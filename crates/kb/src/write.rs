@@ -1,0 +1,679 @@
+//! Writing a note, and the map entry that makes it reachable, as one act.
+//!
+//! [ADR-0007](../../../decisions/0007-memory-architecture.md) makes every write a
+//! proposal a human approves, and `remember.rs` is the proposing half: it measures a
+//! claim against the base and returns ADD, UPDATE or NOOP without touching disk.
+//! **Nothing turned an approved proposal into a file**, so the base could only grow
+//! by hand, and in practice it did not grow.
+//!
+//! # Why a note and its map entry are one operation
+//!
+//! A note with no keys is unreachable. That is not a lint opinion, it is how routing
+//! works: the keyword scorer reads the `Search for:` line in each file's own header, so
+//! a file that declares none can be reached by the full text scorer alone, which is the
+//! single scorer case this system already calls a guess rather than an answer.
+//!
+//! The map entry is the other half and it answers a different question. It is what makes
+//! the file browsable by a person and by a model reading the resident map: the wikilink
+//! and one line saying what the file is. **It stopped carrying a copy of the keys on
+//! 2026-09-07**, per ADR-0041, because the router has read the note's header since
+//! ADR-0028 and a second copy of a list is a copy that drifts. This module writes both
+//! halves in one act, which is ADR-0016 and is untouched; only what each half holds moved.
+//!
+//! It is measured, twice, on 2026-08-17. A routing audit of twenty real questions
+//! found the largest single cause of failure was vocabulary the map did not carry.
+//! A separate audit found 25 alias lines pointing at canonical terms **no map
+//! mentions anywhere**, which is the same defect seen from the other end.
+//!
+//! So `keys` is required and there is no flag to skip it. A tool that can create an
+//! unreachable note has handed you a way to grow a base while making it worse, and
+//! leaving that to the linter means finding it later instead of preventing it now.
+//!
+//! # Why this is a command and not an MCP tool
+//!
+//! [ADR-0010](../../../decisions/0010-memory-as-mcp-server.md) deferred a model
+//! reachable write deliberately: a write tool reachable by a model is a different
+//! security surface, and it gets built deliberately rather than as an afterthought
+//! while the retrieval side is still warm. That still holds. The mechanism belongs
+//! here either way, and putting it on MCP is a separate decision that needs its own
+//! ADR rather than arriving as a side effect of this one.
+
+use std::path::{Path, PathBuf};
+
+// The linter's lists, not a second pair. Keeping a copy here is what let `captured` be legal
+// to `kb check` and illegal to `kb write` at the same time, which made `kb promote` unable to
+// write anything it admitted. See the note on those constants.
+use crate::checks::{PROVENANCE, STAGE};
+
+/// What a note needs before it is allowed to exist.
+#[derive(Clone)]
+pub struct Note {
+    /// One line for the map, saying what the file is **about**. Not an inventory of
+    /// what it mentions: that distinction cost three answers on 2026-08-17, when a
+    /// language decision given the keys `private layer` and `tray language` started
+    /// winning questions that belonged to other files.
+    pub summary: String,
+    /// The words a real question would use. Required. See the module header.
+    pub keys: Vec<String>,
+    /// Where under the agent it lands, and which map section it joins.
+    pub folder: String,
+    pub provenance: String,
+    pub stage: String,
+    /// The deposit this note was distilled from, as the path promotion read it at.
+    ///
+    /// **Nothing recorded this until 2026-09-05, and the pipeline knew it the whole way.**
+    /// `promote::Proposal` carries `source` through promoter one, through the router
+    /// evidence, through all three review lenses and into `kb-rejections.txt`, and then
+    /// the accept branch built this struct, which had nowhere to put it. The one step
+    /// that persists was the one step that forgot, so a note on disk could not say which
+    /// document it came from, and neither could a reader six months later.
+    ///
+    /// **It is not called `source`, and the name is the decision.** [`crate::checks`] W04
+    /// fires on front matter declaring `source`, and demands `evidence_tier` and
+    /// `valid_for` beside it. Those are gradings. A model that assigns its own evidence
+    /// tier produces tier D output wearing an A, so the writer must not be able to claim
+    /// one. This field is a fact about where text came from rather than a judgement about
+    /// how good it is, so it carries a different word and leaves the grading to whoever is
+    /// entitled to make it.
+    ///
+    /// It is also the proof a deletion stands on: the only evidence that a given source
+    /// was absorbed is a note on disk naming it here.
+    pub captured_from: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug)]
+pub struct Written {
+    pub note: PathBuf,
+    pub map: PathBuf,
+    pub section: String,
+    pub section_created: bool,
+    /// Keys the index could not reach, left out of the note that was written.
+    ///
+    /// Reported rather than silently swallowed: a proposer that keeps offering keys no
+    /// question can use is a signal about the proposer, and it is the same argument
+    /// `kb-rejections.txt` makes about proposals that keep being refused.
+    pub dropped_keys: Vec<String>,
+}
+
+// **There is no staging step any more, and there was one for a reason worth keeping.**
+// While `kb` asked `git ls-files` what it may serve, an untracked note was a note the
+// router would not find, so `write` ran `git add` on what it had just written or the
+// loop did not close: a model wrote a memory, the write reported success, and the next
+// question could not see it. Measured on 2026-08-17 against a fresh `kb init`. ADR-0034
+// removed the question the step existed to answer: a note is served the moment it is on
+// disk, because the private layer is a declaration and not a listing.
+
+#[derive(Debug)]
+pub enum WriteError {
+    NoAgent(PathBuf),
+    NoMap(PathBuf),
+    BadSlug(String),
+    Exists(PathBuf),
+    NoKeys,
+    /// Keys the index cannot reach, from the linter's own `unreachable_keys`.
+    DeadKeys(Vec<String>),
+    /// Em or en dashes in what would have been written, from the linter's own `dashes`.
+    Dashes(Vec<(usize, char)>),
+    EmptyBody,
+    BadField(&'static str, String, String),
+    Io(PathBuf, std::io::Error),
+}
+
+impl WriteError {
+    /// Whether this is the writer judging the note, rather than the machine failing.
+    ///
+    /// **The distinction decides whether a document may be destroyed.** `kb ingest` will
+    /// not delete a source unless promotion ran to completion, and "a model could not be
+    /// reached" means the document has not been fully offered yet, so it must survive. A
+    /// note refused for a dead key or an em dash is the opposite: it was read, judged and
+    /// declined, which is a decision and not an outage. Filing both under one heading kept
+    /// every document that produced one imperfect proposal, forever, which was measured on
+    /// the first live run of the verb.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, WriteError::DeadKeys(_) | WriteError::Dashes(_))
+    }
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::NoAgent(p) => write!(
+                f,
+                "no agent at {}. `kb fleet` lists the agents that exist, and `kb init \
+                 <name>` creates one.",
+                p.display()
+            ),
+            WriteError::NoMap(p) => write!(
+                f,
+                "{} has no MAP.md, so there is nowhere to list the note, and a base \
+                 that cannot list cannot route.",
+                p.display()
+            ),
+            WriteError::BadSlug(s) => write!(
+                f,
+                "'{s}' is not a usable name. Lower case letters, digits and hyphens, \
+                 no leading or trailing hyphen, 40 characters at most. It becomes both \
+                 the filename and the [[link]] every other note uses to point here."
+            ),
+            WriteError::Exists(p) => write!(
+                f,
+                "{} already exists. Refusing to overwrite, because a write over a note \
+                 is a silent deletion of whatever it said before. Edit it, or choose \
+                 another name.",
+                p.display()
+            ),
+            WriteError::NoKeys => write!(
+                f,
+                "a note needs keys, and there is no flag to skip it. The keyword scorer \
+                 reads the `Search for:` line in the note's own header, so a note without \
+                 one is a note no question can reach. Give the words a real question would \
+                 use, not a description of the file."
+            ),
+            WriteError::DeadKeys(keys) => write!(
+                f,
+                "every key given is unsearchable: {}. Not one of them reaches the keyword \
+                 index or the phrase index, so the note would exist and no question would \
+                 ever find it. A dead key among live ones is dropped and the note is still \
+                 written; this is the case where nothing is left. Several written \
+                 words that reduce to one \
+                 after stopwords is the usual cause: `o que e ITIL` indexes as `itil` and \
+                 is thrown away as a duplicate of the single key beside it. Rewrite so the \
+                 word carrying the meaning is the one that survives. This is W07, refused \
+                 at the write instead of found later.",
+                keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+            ),
+            WriteError::Dashes(found) => write!(
+                f,
+                "an em or en dash on line {} of the note this would have written. House \
+                 style forbids them and this is W03, refused at the write. 28 of the 47 \
+                 notes `kb promote` has written carry one, because nothing checked and \
+                 nobody ran `kb check` afterwards.",
+                found
+                    .iter()
+                    .map(|(line, _)| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            WriteError::EmptyBody => write!(
+                f,
+                "the note body was empty. It is read from stdin: pipe the markdown in, \
+                 or redirect a file into it."
+            ),
+            WriteError::BadField(field, got, legal) => {
+                write!(f, "{field} was '{got}', which is not one of: {legal}")
+            }
+            WriteError::Io(p, e) => write!(f, "cannot write {}: {e}", p.display()),
+        }
+    }
+}
+
+/// Writes the note and its map entry, or neither.
+///
+/// The note lands first and the map second, and **a failed map write removes the
+/// note again**. Leaving the note behind would produce exactly the unreachable file
+/// this module refuses to create on purpose, except discovered weeks later by
+/// somebody who did not run the command.
+pub fn note(fleet: &Path, agent: &str, slug: &str, spec: &Note) -> Result<Written, WriteError> {
+    if !valid_slug(slug) {
+        return Err(WriteError::BadSlug(slug.to_string()));
+    }
+    if spec.keys.is_empty() {
+        return Err(WriteError::NoKeys);
+    }
+    if spec.body.trim().is_empty() {
+        return Err(WriteError::EmptyBody);
+    }
+    check_field("provenance", &spec.provenance, PROVENANCE)?;
+    check_field("stage", &spec.stage, STAGE)?;
+
+    // **The linter's rules, enforced where the file is made rather than found afterwards.**
+    //
+    // Counted on 2026-09-05 over every note `kb promote` has ever written: 28 of 47 carry
+    // an em dash. The house rule has its own linter check, its own line in every
+    // constitution and its own paragraph in CLAUDE.md, and 60 percent of the machine's
+    // unattended output violates it, because `kb write` ran no check and nobody runs
+    // `kb check` after a promotion. The same pass found 27 dead keys fleet wide, which is
+    // worse than untidy: a key the index cannot reach is a note that question cannot find,
+    // which is the exact failure this module exists to prevent.
+    //
+    // These call the linter's own functions rather than restating the rules. That is not
+    // tidiness either. `checks.rs` and `write.rs` kept separate copies of the STAGE list
+    // and the linter accepted a word the writer refused, so promotion could admit a
+    // proposal unanimously and then fail at the write with nobody watching. Two
+    // implementations of one rule drift, and here they would drift unattended.
+    //
+    // A refusal costs one note. A defective note costs every question it later wins, and
+    // promotion already has somewhere to put a refusal: it lands in `kb-rejections.txt`
+    // with its reason, exactly like a lens saying no.
+    //
+    // **E01 is deliberately not here.** The promoter emits `[[links]]` to sibling notes
+    // proposed in the same batch, which do not exist yet at the moment the first one is
+    // written, so a write-time link check would refuse exactly the cross references a
+    // well distilled document produces. Broken links are checked over the whole batch,
+    // after it lands, and reported rather than auto-edited.
+    // **Dead keys are dropped, not fatal, and that dosage was measured rather than
+    // guessed.** The first version refused the whole note, and on the first live run over
+    // a real document it threw away five good notes because one key in fifteen was
+    // `best practices` or `IT governance`. That is the wrong trade twice over: W07 is a
+    // warning in the linter, not an error, and an unreachable key reaches nothing whether
+    // it is on the page or not, so removing it costs exactly nothing and keeps the note.
+    //
+    // The property this module exists for survives intact, because it was never "every key
+    // works". It is that a note is reachable. So the refusal moves to the only case where
+    // that fails: no key survives at all, and the note would be invisible.
+    let dead = crate::index::unreachable_keys(&spec.keys);
+    let live: Vec<String> =
+        spec.keys.iter().filter(|k| !dead.contains(k)).cloned().collect();
+    if live.is_empty() {
+        return Err(WriteError::DeadKeys(dead));
+    }
+    let mut narrowed = spec.clone();
+    narrowed.keys = live;
+    let spec = &narrowed;
+    let rendered = render_note(spec);
+    let found = crate::checks::dashes(&rendered);
+    if !found.is_empty() {
+        return Err(WriteError::Dashes(found));
+    }
+
+    let root = agent_root(fleet, agent);
+    if !root.is_dir() {
+        return Err(WriteError::NoAgent(root));
+    }
+    let map_path = root.join("MAP.md");
+    if !map_path.is_file() {
+        return Err(WriteError::NoMap(root));
+    }
+
+    let folder = spec.folder.trim_matches('/').to_string();
+    let note_path = root.join(&folder).join(format!("{slug}.md"));
+    if note_path.exists() {
+        return Err(WriteError::Exists(note_path));
+    }
+
+    let map_before =
+        std::fs::read_to_string(&map_path).map_err(|e| WriteError::Io(map_path.clone(), e))?;
+    let (map_after, section, section_created) = place_entry(&map_before, &folder, slug, spec);
+
+    if let Some(parent) = note_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| WriteError::Io(parent.to_path_buf(), e))?;
+    }
+    std::fs::write(&note_path, &rendered).map_err(|e| WriteError::Io(note_path.clone(), e))?;
+
+    if let Err(e) = std::fs::write(&map_path, map_after) {
+        let _ = std::fs::remove_file(&note_path);
+        return Err(WriteError::Io(map_path, e));
+    }
+
+    Ok(Written { note: note_path, map: map_path, section, section_created, dropped_keys: dead })
+}
+
+/// The agent's directory, accepting both shapes ADR-0011 and ADR-0008 leave open:
+/// a fleet with agents under it, or a base addressed directly.
+pub(crate) fn agent_root(fleet: &Path, agent: &str) -> PathBuf {
+    let under_agents = fleet.join("fleet").join(agent);
+    if under_agents.is_dir() {
+        return under_agents;
+    }
+    if fleet.join("MAP.md").is_file() {
+        return fleet.to_path_buf();
+    }
+    under_agents
+}
+
+fn valid_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 40
+        && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+}
+
+fn check_field(
+    name: &'static str,
+    got: &str,
+    legal: &'static [&'static str],
+) -> Result<(), WriteError> {
+    if legal.contains(&got) {
+        return Ok(());
+    }
+    // Built from the list rather than typed beside it. The hand written version said
+    // "raw, distilled, derived" for months after a fourth rung existed, so the message
+    // that was supposed to tell you the legal values was itself the stale copy.
+    let joined: String = legal.join(", ");
+    Err(WriteError::BadField(name, got.to_string(), joined))
+}
+
+fn render_note(spec: &Note) -> String {
+    // **The keys go in the note, per ADR-0028.** They used to go only into the map entry,
+    // which was right while `index::build` iterated map entries and is now the one place the
+    // router does not look. A note written by this command yesterday would be invisible to
+    // retrieval today, and clean to the linter.
+    //
+    // ADR-0016's principle is untouched and is why this is here rather than optional: a note
+    // and the keys that make it reachable arrive together. Only the destination moved.
+    let keys = spec
+        .keys
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // The origin goes in the front matter rather than in the prose, because the front
+    // matter is what `store::sync` lifts into columns on `files` and the body is what the
+    // chunker indexes. As a line of prose it would be one more passage competing for a
+    // seat at the answer table; as a column every hit can carry it for free.
+    //
+    // It is omitted entirely rather than written empty. A note with no origin is the
+    // ordinary case for anything a person wrote by hand, and `captured_from:` with
+    // nothing after it would be a claim that the field was considered and came back
+    // blank, which is not the same statement.
+    let origin = match spec.captured_from.as_deref().map(str::trim) {
+        Some(src) if !src.is_empty() => format!("captured_from: {src}\n"),
+        _ => String::new(),
+    };
+    format!(
+        "---\nprovenance: {}\nstage: {}\n{origin}---\n\n**Search for:** {keys}\n\n**Exists to:** \
+         {}\n\n{}\n",
+        spec.provenance,
+        spec.stage,
+        spec.summary.trim().trim_end_matches('.'),
+        spec.body.trim()
+    )
+}
+
+/// The map entry: the wikilink, and one line saying what the file is.
+///
+/// **It stopped carrying a `Search for:` line on 2026-09-07, and the reason is a second copy
+/// rather than a byte count.** ADR-0028 moved the keys into the note's own header, which is
+/// what `index::header_of` reads; [`render_note`] writes them there. Writing them here as well
+/// produced two copies of one list with nothing keeping them in sync, and the copy the router
+/// does not read is the one that drifts, silently, the first time somebody widens the keys of
+/// a note by hand. A reader who greps the map for a term then gets an answer built from the
+/// stale half.
+///
+/// The tokens are a second-order argument and were already collected: `blocks::assemble`
+/// filters these lines out of every prompt, so the copy was costing the fleet nothing at boot
+/// and still costing every diff, every hand edit and every non-prompt reader. What a map entry
+/// has to do is make the file browsable, and that is the wikilink, the summary and nothing
+/// else. ADR-0041.
+fn render_entry(slug: &str, spec: &Note) -> String {
+    format!("- **[[{slug}]]** {}\n", spec.summary.trim())
+}
+
+/// Inserts the entry at the end of its folder's section, creating the section when
+/// the map has none.
+///
+/// End of section rather than sorted, because a map's order carries meaning nothing
+/// here can read: sections group by folder and entries are often ordered by how they
+/// build on each other. **Appending is the only placement that cannot be wrong about
+/// an ordering it does not understand.**
+fn place_entry(map: &str, folder: &str, slug: &str, spec: &Note) -> (String, String, bool) {
+    let heading = format!("### {folder}/");
+    let entry = render_entry(slug, spec);
+    let lines: Vec<&str> = map.lines().collect();
+
+    let start = match lines.iter().position(|l| l.trim() == heading) {
+        Some(i) => i,
+        None => {
+            let mut out = map.trim_end().to_string();
+            out.push_str(&format!("\n\n{heading}\n\n{entry}"));
+            return (out, heading, true);
+        }
+    };
+
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("### "))
+        .map(|i| start + 1 + i)
+        .unwrap_or(lines.len());
+
+    // Back up over the blank lines that separate one section from the next, so the
+    // entry joins the list rather than landing in the gap after it.
+    let mut at = end;
+    while at > start + 1 && lines[at - 1].trim().is_empty() {
+        at -= 1;
+    }
+
+    let mut out: Vec<String> = lines[..at].iter().map(|s| s.to_string()).collect();
+    out.push(entry.trim_end().to_string());
+    out.extend(lines[at..].iter().map(|s| s.to_string()));
+
+    let mut text = out.join("\n");
+    if map.ends_with('\n') {
+        text.push('\n');
+    }
+    (text, heading, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> Note {
+        Note {
+            summary: "What a thing does and why it works.".into(),
+            keys: vec!["prefill".into(), "kv cache".into()],
+            folder: "knowledge".into(),
+            provenance: "agent".into(),
+            stage: "derived".into(),
+            captured_from: None,
+            body: "# A thing\n\nThe body.".into(),
+        }
+    }
+
+    fn base(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kb-write-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fleet/zed/knowledge")).expect("mkdir");
+        std::fs::write(
+            dir.join("fleet/zed/MAP.md"),
+            "# Map\n\n### knowledge/\n\n- **[[old]]** Already here.\n  Search for: `old`.\n\n### templates/\n\n- **[[t]]** A template.\n  Search for: `template`.\n",
+        )
+        .expect("write map");
+        dir
+    }
+
+    #[test]
+    fn the_stage_a_promotion_writes_is_a_stage_this_can_write() {
+        // The bug this pins: `checks.rs` gained `captured` for ADR-0030 and this file kept
+        // its own copy of the list, so the linter accepted the word and the writer refused
+        // it. `kb promote` could admit a proposal unanimously and then fail at the write,
+        // and nobody saw it, because until the trigger existed every proposal had been
+        // refused before it got that far. Asserting the constant rather than the string
+        // means the next rung is added in one place or the test says so.
+        assert!(
+            STAGE.contains(&crate::promote::CAPTURED),
+            "promote::CAPTURED is '{}', which kb write will not accept, so promotion \
+             cannot write the notes it admits",
+            crate::promote::CAPTURED
+        );
+
+        let dir = base("captured-stage");
+        let mut spec = spec();
+        spec.stage = crate::promote::CAPTURED.into();
+        note(&dir, "zed", "promoted-note", &spec).expect("a promoted note is writable");
+    }
+
+    #[test]
+    fn a_note_and_its_map_entry_are_written_together() {
+        let dir = base("together");
+        let out = note(&dir, "zed", "new-thing", &spec()).expect("written");
+
+        let text = std::fs::read_to_string(&out.note).expect("note");
+        assert!(text.starts_with("---\nprovenance: agent\nstage: derived\n---"), "{text}");
+
+        // The keys are written once, in the note, which is where `index::header_of` reads
+        // them. The map entry is the reading list line and carries none. ADR-0041.
+        assert!(text.contains("**Search for:** `prefill`, `kv cache`"), "{text}");
+
+        let map = std::fs::read_to_string(&out.map).expect("map");
+        assert!(map.contains("- **[[new-thing]]**"), "{map}");
+        assert!(
+            !map.contains("Search for: `prefill`"),
+            "the entry must not carry a second copy of the keys: {map}"
+        );
+    }
+
+    /// A key no question can reach is dropped, and the note is still written.
+    ///
+    /// `o que e ITIL` is the commonest shape a Portuguese question takes and it is not a
+    /// legal key: it reduces to `itil` after stopwords, which the single key beside it
+    /// already covers, so the index throws it away. Refusing the note over it was measured
+    /// as the wrong dosage on the first live run over a real document, where five good
+    /// notes were lost because one key in fifteen was `best practices`.
+    #[test]
+    fn a_key_the_index_cannot_reach_is_dropped_and_the_note_survives() {
+        let dir = base("deadkeys");
+        let mut mixed = spec();
+        mixed.keys = vec!["ITIL".into(), "o que e ITIL".into()];
+
+        let out = note(&dir, "zed", "itil", &mixed).expect("one live key is enough");
+        assert_eq!(out.dropped_keys, vec!["o que e ITIL".to_string()], "and it is reported");
+
+        let text = std::fs::read_to_string(&out.note).expect("note");
+        assert!(text.contains("`ITIL`"), "the reachable key is on the page: {text}");
+        assert!(!text.contains("o que e ITIL"), "the unreachable one is not: {text}");
+    }
+
+    /// The property is that a note is reachable, so the refusal is when nothing reaches it.
+    #[test]
+    fn a_note_whose_every_key_is_dead_is_refused_because_it_would_be_invisible() {
+        let dir = base("alldead");
+        let mut hopeless = spec();
+        hopeless.keys = vec!["o que e ITIL".into(), "what is ITIL".into()];
+
+        let err = note(&dir, "zed", "itil", &hopeless).expect_err("nothing would reach it");
+        let said = err.to_string();
+        assert!(said.contains("W07"), "tied to the check it enforces: {said}");
+        assert!(!dir.join("fleet/zed/knowledge/itil.md").exists(), "nothing left behind");
+    }
+
+    /// The house rule, enforced where the file is made.
+    ///
+    /// Counted on 2026-09-05: 28 of the 47 notes `kb promote` has ever written carry an em
+    /// dash, because nothing checked at the write and nobody ran `kb check` afterwards.
+    #[test]
+    fn an_em_dash_is_refused_before_anything_is_written() {
+        let dir = base("dashes");
+        let mut bad = spec();
+        bad.body = "# A thing\n\nThe body \u{2014} with a dash in it.".into();
+
+        let err = note(&dir, "zed", "dashed", &bad).expect_err("an em dash is refused");
+        let said = err.to_string();
+        assert!(said.contains("W03"), "tied to the check it enforces: {said}");
+        assert!(!dir.join("fleet/zed/knowledge/dashed.md").exists(), "nothing left behind");
+
+        // The summary reaches disk too, in the `Exists to:` line, so the gate reads the
+        // rendered note rather than the body alone.
+        let mut in_summary = spec();
+        in_summary.summary = "What a thing does \u{2014} and why".into();
+        assert!(
+            note(&dir, "zed", "dashed-summary", &in_summary).is_err(),
+            "a dash in the summary lands in the file just the same"
+        );
+    }
+
+    /// The origin reaches disk, and the note that has none does not claim to have looked.
+    ///
+    /// Both halves are the point. `kb promote` knew the deposit behind every proposal and
+    /// dropped it at this exact step for as long as the command has existed, so a
+    /// promoted note could not say what it was distilled from. And a note a person typed
+    /// has no deposit at all, which is the ordinary case: writing `captured_from:` with
+    /// nothing after it would assert that the question was asked and came back empty,
+    /// which is a different statement from never having had a source.
+    #[test]
+    fn the_deposit_a_note_came_from_reaches_the_front_matter_and_is_omitted_when_absent() {
+        let dir = base("origin");
+
+        let mut from_a_deposit = spec();
+        from_a_deposit.captured_from = Some("cosimo/inbox/2026-09-05-gestao-ti.txt".into());
+        let out = note(&dir, "zed", "distilled-note", &from_a_deposit).expect("written");
+        let text = std::fs::read_to_string(&out.note).expect("note");
+        assert!(
+            text.starts_with(
+                "---\nprovenance: agent\nstage: derived\n\
+                 captured_from: cosimo/inbox/2026-09-05-gestao-ti.txt\n---"
+            ),
+            "the origin is front matter, above the keys, so store::sync lifts it: {text}"
+        );
+
+        let out = note(&dir, "zed", "hand-written-note", &spec()).expect("written");
+        let text = std::fs::read_to_string(&out.note).expect("note");
+        assert!(!text.contains("captured_from"), "no source means no line at all: {text}");
+    }
+
+    /// The entry has to join its own section, not whichever one happens to be last.
+    #[test]
+    fn the_entry_lands_in_the_section_for_its_folder() {
+        let dir = base("section");
+        note(&dir, "zed", "new-thing", &spec()).expect("written");
+
+        let map = std::fs::read_to_string(dir.join("fleet/zed/MAP.md")).expect("map");
+        let at_new = map.find("[[new-thing]]").expect("present");
+        let at_templates = map.find("### templates/").expect("present");
+        assert!(at_new < at_templates, "it belongs under knowledge/:\n{map}");
+    }
+
+    #[test]
+    fn a_folder_with_no_section_gets_one() {
+        let dir = base("newsection");
+        let mut s = spec();
+        s.folder = "knowledge/systems".into();
+        let out = note(&dir, "zed", "new-thing", &s).expect("written");
+
+        assert!(out.section_created, "the section did not exist before");
+        let map = std::fs::read_to_string(&out.map).expect("map");
+        assert!(map.contains("### knowledge/systems/"), "{map}");
+        assert!(out.note.ends_with("knowledge/systems/new-thing.md"), "{:?}", out.note);
+    }
+
+    /// The rule this module exists for.
+    #[test]
+    fn a_note_without_keys_is_refused() {
+        let dir = base("nokeys");
+        let mut s = spec();
+        s.keys.clear();
+        assert!(matches!(note(&dir, "zed", "x", &s), Err(WriteError::NoKeys)));
+        assert!(!dir.join("fleet/zed/knowledge/x.md").exists(), "nothing left behind");
+    }
+
+    #[test]
+    fn an_existing_note_is_never_overwritten() {
+        let dir = base("exists");
+        note(&dir, "zed", "twice", &spec()).expect("first");
+        let again = note(&dir, "zed", "twice", &spec());
+        assert!(matches!(again, Err(WriteError::Exists(_))), "{again:?}");
+    }
+
+    #[test]
+    fn a_bad_slug_is_refused_before_anything_is_touched() {
+        let dir = base("slug");
+        for bad in ["", "New Thing", "-lead", "trail-", "under_score"] {
+            assert!(
+                matches!(note(&dir, "zed", bad, &spec()), Err(WriteError::BadSlug(_))),
+                "{bad}"
+            );
+        }
+        let map = std::fs::read_to_string(dir.join("fleet/zed/MAP.md")).expect("map");
+        assert!(!map.contains("New Thing"), "the map was not touched");
+    }
+
+    #[test]
+    fn an_illegal_provenance_is_refused() {
+        let dir = base("prov");
+        let mut s = spec();
+        s.provenance = "robot".into();
+        assert!(matches!(
+            note(&dir, "zed", "x", &s),
+            Err(WriteError::BadField("provenance", _, _))
+        ));
+    }
+
+    #[test]
+    fn a_missing_agent_says_so_rather_than_creating_one() {
+        let dir = base("noagent");
+        let out = note(&dir, "ghost", "x", &spec());
+        assert!(matches!(out, Err(WriteError::NoAgent(_))), "{out:?}");
+    }
+}

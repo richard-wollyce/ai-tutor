@@ -1,0 +1,1294 @@
+//! Who should answer, decided by a model reading the evidence, not by arithmetic.
+//!
+//! **This is ADR-0013's own rule finally applied to the right question.** That record
+//! says, in its own words, *classification is the model's job and lookup is the code's
+//! job*, and it names the failure it was written against: an earlier version that
+//! *classified questions and answered with strings we had written, which is code doing a
+//! model's job badly*. Choosing an agent is classification. It was implemented as a sum of
+//! IDF weighted keyword scores, and three days were then spent patching that sum with
+//! stopword lists, alias files, an incumbent margin and a corpus share normalisation, each
+//! measured and most of them removed.
+//!
+//! **The reason arithmetic cannot do this job, stated once.** Retrieval and routing ask
+//! different questions. *Which file contains this* is lexical, and a keyword index answers
+//! it exactly. *Who understands this subject* is semantic, and no count of shared words
+//! answers it at all. The proof is a domain nobody has written about: ask about DevOps in a
+//! fleet with no DevOps agent and every base scores zero or noise, while a reader who knows
+//! only that Zed does *software architecture and building* and Steve does *marketing* can
+//! place it immediately, and can also say the thing that matters most, which is that
+//! **nobody here really covers it**.
+//!
+//! ## The split this file preserves
+//!
+//! Retrieval stays exactly as it was: deterministic, no model, reproducible, and the only
+//! thing that reads the corpus. What reaches this file is a **dossier**: the roster, the
+//! evidence retrieval found, and the question. Roughly three hundred tokens, and never the
+//! base itself. So the classifier is cheap, and it cannot invent a file, because it never
+//! sees the corpus and its answer is a name from a list it was given.
+//!
+//! ## Why the classifier is a command and not a provider
+//!
+//! Richard's requirement is that the system works whichever client is in front of it. So
+//! the contract is a process: **dossier on stdin, verdict on stdout.** Any model behind any
+//! runtime satisfies it, including a local one, and `kb` gains no dependency and no network
+//! code. When no classifier is configured or the command fails, routing falls back to the
+//! deterministic choice, so **the fleet never stops answering because a model was
+//! unavailable.**
+
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::memory::{AgentChoice, Memory};
+use crate::retrieve::Retrieved;
+
+/// How the classifier is reached, from `classifier = ...` in the fleet manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Classifier {
+    /// No line in the manifest: the deterministic choice stands alone.
+    None,
+    /// A command that reads the dossier on stdin and writes the verdict on stdout.
+    Command(String),
+    /// A direct HTTP endpoint (e.g. resident llama-server on localhost:4115).
+    Http(String),
+}
+
+impl Classifier {
+    /// Parses a manifest classifier declaration into a Command or direct Http endpoint.
+    pub fn from_manifest(cmd: &str) -> Self {
+        let trimmed = cmd.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            Classifier::Http(trimmed.to_string())
+        } else if !trimmed.is_empty() {
+            Classifier::Command(trimmed.to_string())
+        } else {
+            Classifier::None
+        }
+    }
+}
+
+/// What the classifier concluded, and the reason a caller can show a person.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// The agent that should answer, when one should.
+    pub owner: Option<String>,
+    pub coverage: Coverage,
+    /// The subject as the classifier named it. This is what a person reads when the
+    /// fleet says nobody covers something, and what a new agent would be created for.
+    pub subject: String,
+    pub reason: String,
+    /// The agents that must object before this ships, when the message makes a claim
+    /// that lands in a second domain. Empty is the normal answer.
+    ///
+    /// **The router decides this, and it decides it here rather than in arithmetic.**
+    /// The deterministic side computes `margin` and `contenders` on every message and
+    /// they look like the right signal. Measured against this fleet's own 49 question
+    /// gold set on 2026-09-04: every question with exactly one correct owner had between
+    /// 2 and 10 contenders, median 4, so `contenders > 1` fires on all of them; and a
+    /// margin cut of 1.5 fires on 25% of them, 2.0 on 40%, 3.0 on 78%. There is no cut
+    /// that separates a two domain question from a one domain question with a shared
+    /// vocabulary, which is the same shape `MIN_MARGIN` already recorded for a different
+    /// use. So the judgement goes where ADR-0027 put the owner judgement: to the model
+    /// that reads the roles and the edges.
+    pub reviewers: Vec<Reviewer>,
+}
+
+/// One agent that has to object before a piece ships, and what it is being asked to check.
+///
+/// The `why` is not decoration. A reviewer arrives with somebody else's constitution and
+/// no idea why it was called, and *what does your domain say about this* is a different
+/// question from *what do you think of this*. The second one produces praise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reviewer {
+    pub agent: String,
+    pub why: String,
+}
+
+/// How many reviewers a verdict may name.
+///
+/// **Measured, on this machine, 2026-09-04.** A three reviewer panel run through real
+/// subagents on a 7.5 KB artifact cost 60,010 + 67,537 + 78,408 = 205,955 tokens, about
+/// 69,000 per reviewer. The static estimate of the same panel, the constitutions plus the
+/// artifact read once each, was 30,906: the subagent's own harness is the larger half, and
+/// a report that counts only the documents understates a panel by about 6.7x.
+///
+/// So the cap is a budget rather than a style rule. Three is what the objection round
+/// protocol already used as its default panel, and a fourth reviewer is another 69,000
+/// tokens spent on a domain the piece probably only touches.
+pub const MAX_PANEL: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// An agent's domain covers this, and the base has material.
+    Covered,
+    /// No agent owns the subject; the named one is merely the nearest. **This is the
+    /// state the whole file exists for**, because it is the one arithmetic cannot
+    /// report: a score of zero says "no match" and never says "no one here does this".
+    Adjacent,
+    /// Nobody, and nothing near enough to name.
+    Uncovered,
+}
+
+impl Coverage {
+    fn parse(s: &str) -> Coverage {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "covered" => Coverage::Covered,
+            "adjacent" => Coverage::Adjacent,
+            _ => Coverage::Uncovered,
+        }
+    }
+}
+
+/// The prompt, assembled from the roster and the evidence.
+///
+/// Deliberately small and deliberately closed: the classifier is told the only names it
+/// may answer with, so an invented agent is a parse failure rather than a routing error.
+///
+/// **Split into a prefix that never varies and a tail that always does**, and the split is
+/// worth real time rather than being tidiness. A resident llama.cpp server keeps the KV
+/// cache of the longest prefix it has already computed, so everything ahead of the first
+/// difference is free after the first message. Measured on this machine with a 2B: the
+/// server processed 755 tokens per message before the split and about 495 after it,
+/// 7.9 seconds of prefill down to 4.0.
+///
+/// The two halves are separate functions so the boundary is a thing the compiler knows
+/// about. Written as one function with a comment in the middle, the boundary survives
+/// exactly until someone adds a line in the wrong place.
+pub fn dossier(
+    memory: &Memory,
+    question: &str,
+    found: &[Retrieved],
+    confidence: crate::memory::Confidence,
+) -> String {
+    let mut out = stable_prefix(memory);
+    out.push_str(&variable_tail(question, found, confidence, &species_table(memory, question)));
+    out
+}
+
+/// Everything identical for every message: who is being asked, the roster, and the rules
+/// for judging. Changes only when the fleet does.
+fn stable_prefix(memory: &Memory) -> String {
+    let mut out = String::new();
+
+    out.push_str(
+        "You are Vesta, the librarian of a fleet of agents. Decide who should answer one \
+         message. Answer in the exact format at the end and write nothing else.\n\n\
+         THE FLEET, and these names are the only ones you may choose:\n",
+    );
+    for agent in memory.agents.iter().filter(|a| a.routable) {
+        let card = crate::fleet::card(&agent.root, "agent.txt", &agent.name);
+        out.push_str(&format!(
+            "  {}\n    does:  {}\n",
+            agent.name.to_lowercase(),
+            card.role.unwrap_or_else(|| "not declared".into())
+        ));
+        // The edge matters more than the role for the judgement being asked for. A
+        // list of roles says what each agent does; only the edges say what none of
+        // them does, and that is the answer arithmetic can never give.
+        if let Some(ends) = card.ends {
+            out.push_str(&format!("    stops: {ends}\n"));
+        }
+    }
+
+    // The judging rules sit here, ahead of the evidence, rather than after the message
+    // where they used to be. They are the same for every message, so they belong on this
+    // side of the boundary.
+    out.push_str(
+        "\nJudge by what each agent does and where it stops, never by the scores. The \
+         scores say which files share words with the message; they never say who \
+         understands the subject. A message may belong to an agent whose base scored \
+         nothing, and a high score in a base whose domain does not fit is a coincidence \
+         of vocabulary.\n\n\
+         COVERAGE is the field that matters and the bar for `covered` is high. Use it \
+         only when the subject is plainly part of what that agent does, as its own two \
+         lines describe it. If the subject merely sits near an agent's work, or needs \
+         knowledge that agent has no reason to hold, answer `adjacent` and name that \
+         agent as the nearest. When torn between covered and adjacent, answer adjacent.\n\n\
+         Worked example, with a fleet of a marketer, a nutritionist, an architect who \
+         builds software and stops before running it, and an interface designer, asked \
+         about Kubernetes autoscaling: the answer is `adjacent`, owner the architect, \
+         because operating systems in production is a different craft from designing and \
+         building them. Answering `covered` there hides a real gap behind a confident \
+         name, and the gap is the useful part: it tells the person a new agent may be \
+         worth creating.\n",
+    );
+
+    // **The panel question, and it is in the cached half deliberately.** `stable_prefix`
+    // is identical for every message, so prefix caching pays for these lines once; the
+    // same text in `variable_tail` would be recomputed on every message forever.
+    //
+    // Kept short against the measured warning below: a rule added here competes with every
+    // other rule for the model's attention, and the last paragraph added to this prompt
+    // cost one question on the coverage set. The default answer is stated first and stated
+    // as the normal one, so the cheap outcome is the one the model reaches for.
+    out.push_str(
+        "\nMost messages have one owner and one owner is the normal answer. A few make a \
+         claim that lands squarely in a second agent's domain as well: a page that has to \
+         sell and also has to be true, a launch note that is really a security statement, \
+         a script that quotes a benchmark. For those, and only those, name REVIEWERS: the \
+         agents that must object before the work ships, and say in a few words what each \
+         one is being asked to check, in that agent's own terms. Naming a reviewer costs \
+         that agent's entire constitution and its attention, so name none unless the work \
+         would be wrong without them. Never name the owner as a reviewer.\n",
+    );
+
+    // **A second worked example, for `uncovered`, was written here and measured out.**
+    // The reasoning was clean: the rules demonstrate `adjacent` and never `uncovered`,
+    // so the answer that matters most has no example. It cost a question. Haiku scored
+    // 13 of 14 on the coverage set without it and 12 with it, and the 2B was unmoved at
+    // 6 either way. What the same session's measurements did buy was an edit to one
+    // agent's `ends` line, worth two questions.
+    //
+    // The general shape, since it is now the third time: **more instruction is not more
+    // accuracy, and the roster is where the leverage is.** A rule added to the prompt
+    // competes with every other rule for the model's attention; a fact added to an
+    // agent's card is the only description of that agent there is.
+
+    out
+}
+
+/// Reduces a catalogue blurb to the one line the classifier can use.
+///
+/// Strips the list marker, the wikilink that repeats the filename, and any leading
+/// decoration, then cuts at a sentence end near the cap. The cap exists because the
+/// evidence block is the variable half of the dossier and every character in it is
+/// recomputed on every message.
+fn one_line(summary: &str) -> String {
+    const CAP: usize = 160;
+
+    let mut t = summary.trim();
+    t = t.trim_start_matches(['-', '*', ' ']);
+    // `**[[name]]**` repeats the path printed on the line above it.
+    if let Some(rest) = t.strip_prefix("[[") {
+        if let Some((_, after)) = rest.split_once("]]") {
+            t = after;
+        }
+    }
+    let t: String = t
+        .trim_start_matches(['*', ' '])
+        .chars()
+        .filter(|c| c.is_ascii() || c.is_alphabetic())
+        .collect();
+    let t = t.replace('*', "").replace('`', "");
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if t.chars().count() <= CAP {
+        return t;
+    }
+    // Prefer a sentence boundary inside the budget over a hard cut mid-word.
+    let head: String = t.chars().take(CAP).collect();
+    match head.rfind(". ") {
+        Some(i) if i > CAP / 3 => head[..=i].trim().to_string(),
+        _ => match head.rfind(' ') {
+            Some(i) => format!("{}...", head[..i].trim_end_matches(',')),
+            None => head,
+        },
+    }
+}
+
+/// Everything that changes with the message: what retrieval found, the message itself,
+/// and the four lines to answer in.
+/// The best keyword score per species per agent, over the fold's own window.
+///
+/// **Computed here and not from the fused top 5, which was the first version's defect.**
+/// Measured on the ads-library probe: the fold counted Steve's tools declaration at keyword
+/// rank 8 (memory 115.9 plus tools 37.8), while the fused top 5 was five memory files, so
+/// the classifier was told one species contributed when the router had acted on two. Same
+/// query and the same oversample as `Memory::ask`, so the table and the fold cannot see
+/// different worlds. Lives beside `dossier` rather than inside `variable_tail` so the tail
+/// stays testable without a fleet on disk.
+fn species_table(memory: &Memory, question: &str) -> Vec<(String, [f32; 3])> {
+    let hits = memory.route(question, 5 * crate::retrieve::KEYWORD_OVERSAMPLE);
+    let mut per: Vec<(String, [f32; 3])> = Vec::new();
+    for h in &hits {
+        if h.score <= 0.0 {
+            continue;
+        }
+        let k = crate::index::kind_of(&h.entry.rel) as usize;
+        match per.iter_mut().find(|(b, _)| *b == h.entry.base) {
+            Some((_, slots)) => {
+                if h.score > slots[k] {
+                    slots[k] = h.score;
+                }
+            }
+            None => {
+                let mut slots = [0.0f32; 3];
+                slots[k] = h.score;
+                per.push((h.entry.base.clone(), slots));
+            }
+        }
+    }
+    per.sort_by(|a, b| {
+        let sa: f32 = a.1.iter().sum();
+        let sb: f32 = b.1.iter().sum();
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    per
+}
+
+fn variable_tail(
+    question: &str,
+    found: &[Retrieved],
+    confidence: crate::memory::Confidence,
+    species: &[(String, [f32; 3])],
+) -> String {
+    let mut out = String::new();
+
+    out.push_str(
+        "\nWHAT THE LIBRARY FOUND for this message. The search is lexical, so a high score \
+         means shared words and not shared meaning, and an empty list means nobody has \
+         written about this yet, which is information rather than an error:\n",
+    );
+    if found.is_empty() {
+        out.push_str("  (nothing matched)\n");
+    } else {
+        for f in found.iter().take(5) {
+            out.push_str(&format!(
+                "  [{}] {}/{}  score {:.1}  matched: {}\n",
+                crate::index::kind_of(&f.path).label(),
+                f.base,
+                f.path,
+                f.keyword_score,
+                if f.matched.is_empty() { "text only".into() } else { f.matched.join(", ") }
+            ));
+            // **A path is not evidence about a subject.** Without this line the
+            // classifier is shown a filename and a score and asked whether the fleet
+            // covers a domain, so it has to infer what the file is from how it is named.
+            //
+            // The text comes from the map entry, which was written to be read in a
+            // catalogue rather than to answer this question, so it arrives carrying its
+            // own list marker, its wikilink and sometimes an emoji. Those are stripped
+            // and it is cut to one line: five untrimmed entries added about four hundred
+            // tokens to a three hundred token dossier.
+            if !f.purpose.is_empty() {
+                out.push_str(&format!("      about: {}\n", one_line(&f.purpose)));
+            }
+        }
+    }
+
+    // **What retrieval thinks of its own answer, which the classifier was never told.**
+    //
+    // The evidence list is scores and paths, and a score alone cannot be read. The keyword
+    // lines were widened from a median of six terms to about seventy, and the hit and miss
+    // ranges now overlap completely: 20.02 to 187.39 against 21.27 to 132.66. **No threshold
+    // in code separates them.** That is the second time this has been measured here, the
+    // first being the rejected cascade, and it is why this is a sentence for a reader rather
+    // than a gate in the router.
+    //
+    // So the numbers are handed over with their meaning attached and the judgement stays
+    // where ADR-0013 put it. Agreement between the two independent scorers is the strongest
+    // signal available without a model, and it is exactly what a bare score hides.
+
+    // **The three questions, separated, per agent.** ADR-0031: "knows about it" is memory,
+    // "knows how" is skills, "has the means" is tools, and a list of five files cannot
+    // carry that distinction on its own. The table arrives computed from the fold's own
+    // window (see `species_table` for the measured defect that rule closes), so what the
+    // classifier reads is the evidence the router acted on.
+    if !species.is_empty() {
+        out.push_str(
+            "\nBEST OF EACH SPECIES, per agent: knows about it (memory), knows how \
+             (skills), has the means (tools). A dash is no evidence of that species at \
+             all, which is itself information:\n",
+        );
+        for (base, slots) in species.iter().take(4) {
+            let cell = |v: f32| {
+                if v > 0.0 { format!("{v:.1}") } else { "-".into() }
+            };
+            out.push_str(&format!(
+                "  {base}: memory {}, skills {}, tools {}\n",
+                cell(slots[0]),
+                cell(slots[1]),
+                cell(slots[2])
+            ));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nWHAT RETRIEVAL THINKS OF THAT. Top keyword score {:.1}, against a floor of {:.1} \
+         below which nothing is worth answering from. {} of the two independent scorers \
+         ranked that file, and it leads the runner-up by {:.2}x. Retrieval's own verdict: \
+         {}.\n\n\
+         Weigh that before deciding coverage. A high score on a base whose domain does not \
+         fit is a coincidence of vocabulary, and one scorer alone is the case this system \
+         reports as a guess rather than an answer.\n",
+        confidence.keyword_score,
+        confidence.floor,
+        match confidence.agreement {
+            2 => "Both",
+            1 => "Only one",
+            _ => "Neither",
+        },
+        confidence.margin,
+        match confidence.verdict {
+            crate::memory::Verdict::Hit => "something here matches",
+            crate::memory::Verdict::Guess =>
+                "this is a guess, too weak or too close to the runner-up to tell from a \
+                 coincidence of vocabulary",
+            crate::memory::Verdict::Nothing => "nothing matched at all",
+        }
+    ));
+
+    out.push_str(&format!("\nTHE MESSAGE:\n  {}\n", question.replace('\n', " ")));
+
+    // The four fields are answered in the order they are derived in, not the order they
+    // are read in. A 0.8B asked for the owner first wrote `OWNER: steve` above a REASON
+    // that described a different agent entirely: it committed to a name and then
+    // narrated around it. Naming the subject first costs about twenty tokens of output
+    // and gives the choice something to follow from.
+    out.push_str(
+        "\nAnswer in exactly these five lines, in this order:\n\
+         SUBJECT: <two to five words naming the domain this message belongs to>\n\
+         REASON: <one sentence>\n\
+         COVERAGE: <covered|adjacent|uncovered>\n\
+         OWNER: <name from the list, or none>\n\
+         REVIEWERS: <none, or up to three as `name: what they must check`, separated by ;>\n",
+    );
+    out
+}
+
+/// Parses the four lines, tolerantly, and refuses a name that is not on the roster.
+///
+/// **A model naming an agent that does not exist is the one failure that must not pass**,
+/// because every surface downstream treats the owner as real. Unknown name resolves to no
+/// owner, which the caller already knows how to present.
+pub fn parse(reply: &str, roster: &[String]) -> Option<Verdict> {
+    let field = |key: &str| -> Option<String> {
+        reply.lines().find_map(|l| {
+            // Models decorate. Strip the emphasis before looking for the key, and
+            // again after taking the value, so `**OWNER:** Zed` reads the same as
+            // `OWNER: zed`. Found by the test that asserts exactly that.
+            let l = l.trim().trim_start_matches(['*', '-', '#', ' ']);
+            let rest = l.strip_prefix(key)?;
+            let rest = rest.trim_start_matches(['*', ' ']);
+            let rest = rest.strip_prefix(':').unwrap_or(rest);
+            Some(rest.trim().trim_matches('*').trim().to_string())
+        })
+    };
+
+    let coverage = Coverage::parse(&field("COVERAGE").unwrap_or_default());
+    let raw_owner = field("OWNER").unwrap_or_default();
+    let owner = roster
+        .iter()
+        .find(|r| r.eq_ignore_ascii_case(raw_owner.trim()))
+        .cloned();
+
+    // A reply with no recognisable field at all is not a verdict, it is noise.
+    if field("COVERAGE").is_none() && field("OWNER").is_none() {
+        return None;
+    }
+
+    Some(Verdict {
+        reviewers: reviewers(&field("REVIEWERS").unwrap_or_default(), roster, owner.as_deref()),
+        owner,
+        coverage,
+        subject: field("SUBJECT").unwrap_or_default(),
+        reason: field("REASON").unwrap_or_default(),
+    })
+}
+
+/// The reviewer list, filtered to names that exist and bounded to [`MAX_PANEL`].
+///
+/// **Three rules, and every one of them is a way a panel quietly becomes theatre.**
+///
+/// A name off the roster is dropped, for the same reason an owner off the roster is: every
+/// surface downstream treats it as real, and `kb panel` would refuse it later anyway, after
+/// the person had already been told to convene it.
+///
+/// The owner is dropped, because an objection from the owner is a revision. The prompt says
+/// so and this enforces it, because a rule a prompt asks for is a rule a model follows most
+/// of the time.
+///
+/// The list is truncated rather than refused. A verdict that named four is a verdict that
+/// judged the message correctly and overspent, and throwing the whole answer away over the
+/// fourth name would lose the first three.
+fn reviewers(raw: &str, roster: &[String], owner: Option<&str>) -> Vec<Reviewer> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") || raw == "-" {
+        return Vec::new();
+    }
+    let mut out: Vec<Reviewer> = Vec::new();
+    for part in raw.split(';') {
+        let part = part.trim().trim_start_matches(['*', '-', ' ']);
+        if part.is_empty() {
+            continue;
+        }
+        let (name, why) = match part.split_once(':') {
+            Some((n, w)) => (n.trim(), w.trim()),
+            None => (part, ""),
+        };
+        let name = name.trim_matches(['*', '`', ' ']);
+        let Some(known) = roster.iter().find(|r| r.eq_ignore_ascii_case(name)) else { continue };
+        if owner.is_some_and(|o| o.eq_ignore_ascii_case(known)) {
+            continue;
+        }
+        if out.iter().any(|r| r.agent.eq_ignore_ascii_case(known)) {
+            continue;
+        }
+        out.push(Reviewer { agent: known.clone(), why: why.to_string() });
+        if out.len() == MAX_PANEL {
+            break;
+        }
+    }
+    out
+}
+
+/// **Built, measured and rejected on 2026-08-19.** Kept, with its number, because the
+/// idea is obvious enough that somebody will propose it again.
+///
+/// The cascade was going to be ADR-0013's own prescription applied to cost: route always,
+/// and *spend intelligence only where the free mechanism admitted it failed*. Asking a
+/// model about every message costs 13 to 16 seconds on this machine; gating on "one agent
+/// holds the field" dropped the common case to about one second, measured.
+///
+/// It also broke the one case the classifier exists for. Asked *como faco deploy com zero
+/// downtime e monitoramento de infra*, the word **zero** matched three of Steve's research
+/// notes at 15.89 each. Steve was therefore the only agent scoring, held 100% of the
+/// field, cleared the floor, and the gate let the arithmetic answer alone: DevOps routed
+/// to marketing in 971 ms.
+///
+/// **The mechanism, and it is why no threshold rescues this:** a cascade can only gate on
+/// the deterministic score, and the deterministic score does not know when it is wrong.
+/// One agent alone in the field does not distinguish "plainly theirs" from "a coincidence
+/// of vocabulary", and those two are the same number. A gate built on a blind signal
+/// inherits the blindness.
+///
+/// So the classifier runs on every message and the latency is paid honestly. If it must
+/// come down, the answer is a faster classifier (a local model, a resident process), not a
+/// cheaper decision about when to think.
+const UNCONTESTED: f64 = 0.70;
+
+/// Whether the deterministic choice dominates its field. **No longer consulted**; see the
+/// constant above for the measurement that took it out of the path. Kept so the rejected
+/// idea has a testable definition rather than only a paragraph.
+pub fn is_uncontested(choice: Option<&AgentChoice>, verdict: crate::memory::Verdict) -> bool {
+    if verdict != crate::memory::Verdict::Hit {
+        return false;
+    }
+    let Some(c) = choice else { return false };
+    let total: f64 = c.totals.iter().map(|(_, w)| *w).sum();
+    if total <= 0.0 {
+        return false;
+    }
+    c.score / total >= UNCONTESTED
+}
+
+/// An empty directory, outside the fleet, for the classifier to run in.
+///
+/// **This is worth 33 seconds a message and it is the difference between the classifier
+/// fitting inside the hook's budget and not.** Measured on 2026-08-20 with the same
+/// dossier, the same model and the same flags, varying only the working directory:
+///
+/// | working directory | wall | of which API |
+/// |---|---|---|
+/// | the fleet root | 47.4s | 12.8s |
+/// | an empty directory | 11.5s | 7.1s |
+///
+/// A CLI runtime inspects the directory it starts in: its instruction files, its settings,
+/// its git repository, its tree. This fleet root holds 11,510 files and 2.5 GB of Rust
+/// build output, and the classifier was paying to have all of it looked at, on every
+/// message, to answer a question whose entire input arrives on stdin.
+///
+/// **It is also the isolation the design already claimed.** `classify-claude.cmd` spends
+/// two flags stopping the classifier from reading the base, on the grounds that a
+/// classifier that can search stops being a judge and becomes a second agent. Starting it
+/// inside the base contradicted that, and the cost was the tell.
+///
+/// Outside the fleet rather than under `.kb/`, because a runtime that walks up from its
+/// working directory looking for instruction files would find the fleet's own from any
+/// directory inside it, and the saving would quietly disappear.
+pub(crate) fn scratch_cwd(root: &Path) -> PathBuf {
+    let dir = std::env::temp_dir().join("kb-classifier-cwd");
+    // Best effort on purpose. If the directory cannot be made, running in the root is
+    // slow and correct, and slow and correct beats refusing to route.
+    if std::fs::create_dir_all(&dir).is_ok() {
+        dir
+    } else {
+        root.to_path_buf()
+    }
+}
+
+/// Splits a command line into program and arguments, honouring double quotes.
+///
+/// Deliberately not a shell parser: no variable expansion, no globbing, no single quotes,
+/// no escapes. `Command::new` is called with separate arguments and nothing is ever handed
+/// to `sh -c`, so there is no injection surface to protect and no reason to grow one. The
+/// only job here is that a quoted path with a space in it survives, which is the whole of
+/// what breaks on Windows.
+fn split_command(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in cmd.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
+}
+
+#[cfg(test)]
+mod split_command_tests {
+    use super::split_command;
+
+    #[test]
+    fn a_quoted_path_with_a_space_stays_one_argument() {
+        let got = split_command(r#""C:\Program Files\llama\main.exe" -q --fast"#);
+        assert_eq!(got, vec![r"C:\Program Files\llama\main.exe", "-q", "--fast"]);
+    }
+
+    #[test]
+    fn the_ordinary_case_is_unchanged() {
+        assert_eq!(
+            split_command("tools/classify-claude.cmd --model sonnet"),
+            vec!["tools/classify-claude.cmd", "--model", "sonnet"]
+        );
+    }
+
+    #[test]
+    fn an_empty_quoted_argument_survives_rather_than_vanishing() {
+        assert_eq!(split_command(r#"prog "" x"#), vec!["prog", "", "x"]);
+    }
+
+    #[test]
+    fn runs_of_whitespace_do_not_produce_empty_arguments() {
+        assert_eq!(split_command("  prog   a  "), vec!["prog", "a"]);
+    }
+
+    #[test]
+    fn nothing_at_all_yields_nothing() {
+        assert!(split_command("   ").is_empty());
+    }
+
+    /// The half that is easy to leave out of a second copy: a command in the manifest is
+    /// written relative to the fleet root, and every caller moves the child's working
+    /// directory, so the name has to be resolved before that happens.
+    #[test]
+    fn a_relative_program_resolves_against_the_root_and_a_bare_name_does_not() {
+        use std::path::Path;
+        let root = std::env::temp_dir().join(format!("kb-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("tools")).expect("dirs");
+        let script = root.join("tools").join("chat-x.cmd");
+        std::fs::write(&script, "@echo off\n").expect("script");
+
+        let (program, args) =
+            super::resolve(&root, r"tools\chat-x.cmd -p --stream").expect("splits");
+        assert_eq!(program, script, "a file under the root resolves to it: {program:?}");
+        assert_eq!(args, vec!["-p", "--stream"]);
+
+        let (program_slash, _) =
+            super::resolve(&root, "tools/chat-x.cmd -p --stream").expect("splits");
+        assert_eq!(program_slash, script, "forward slash path under root resolves: {program_slash:?}");
+
+        let (bare, _) = super::resolve(Path::new("."), "claude -p").expect("splits");
+        assert_eq!(bare, Path::new("claude"), "a name on PATH passes through untouched");
+
+        assert!(super::resolve(&root, "   ").is_none(), "an empty command is not a command");
+    }
+}
+
+/// Splits a configured command line and resolves its program against the fleet root.
+///
+/// Extracted from [`run`] when the reading room's chat became configurable, because the
+/// two were about to hold separate opinions about the same two questions: how a quoted
+/// path is split, and what a relative program name is relative to. A second copy of this
+/// is how one surface comes to accept `"C:\Program Files\..."` and the other does not.
+///
+/// The root resolution is the half that is easy to omit and impossible to notice: commands
+/// are written relative to the fleet root in `fleet.txt`, and every caller changes the
+/// child's working directory, so the name has to be resolved before that happens. An
+/// absolute path, or a bare name that lives on PATH, passes through untouched.
+///
+/// Backslashes in paths written on Windows (e.g. `tools\foo`) are normalized to `/` so
+/// that relative resolution against the root works reliably on Linux/macOS as well.
+pub fn resolve(root: &Path, cmd: &str) -> Option<(PathBuf, Vec<String>)> {
+    let parts = split_command(cmd);
+    let mut parts = parts.into_iter();
+    let program = parts.next()?;
+    let args: Vec<String> = parts.collect();
+    let normalized = program.replace('\\', "/");
+    let candidate = root.join(&normalized);
+    let resolved = if candidate.is_file() { candidate } else { PathBuf::from(program) };
+    Some((resolved, args))
+}
+
+/// Runs the classifier and returns its verdict, or None when it cannot be reached.
+///
+/// Every failure path returns None rather than an error, because the caller's fallback is
+/// the deterministic choice and a fleet that stops routing when a model is unavailable is
+/// worse than one that routes the old way.
+pub fn run(classifier: &Classifier, root: &Path, dossier: &str, roster: &[String]) -> Option<Verdict> {
+    match classifier {
+        Classifier::None => None,
+        Classifier::Http(url) => run_http(url, dossier, roster),
+        Classifier::Command(cmd) => {
+            // Quotes are honoured, because the first thing a Windows user types is a path with a
+            // space in it. The command is resolved against the fleet root before the working directory
+            // stops being the root. An absolute path or a bare name on PATH passes through untouched.
+            let (resolved, args) = resolve(root, cmd)?;
+
+            let mut child = crate::base::quiet(&resolved.to_string_lossy())
+                .args(&args)
+                .current_dir(scratch_cwd(root))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+
+            // The dossier goes on stdin, never in the argument list: it contains the user's
+            // message, and an argument list is a quoting surface. Same reason the desk does it.
+            child.stdin.take()?.write_all(dossier.as_bytes()).ok()?;
+
+            let out = child.wait_with_output().ok()?;
+            let reply = String::from_utf8_lossy(&out.stdout);
+            parse(&reply, roster)
+        }
+    }
+}
+
+/// Sends the dossier to an HTTP endpoint (such as a resident llama.cpp server)
+/// with a dynamically generated GBNF grammar for type-safe structured output.
+pub fn run_http(url: &str, dossier: &str, roster: &[String]) -> Option<Verdict> {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+
+    let (host_port, path) = match without_scheme.split_once('/') {
+        Some((hp, p)) => (hp, format!("/{p}")),
+        None => (without_scheme, "/v1/chat/completions".to_string()),
+    };
+
+    let (host, port) = match host_port.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (host_port, 80),
+    };
+
+    // Build closed GBNF grammar strictly bounding OWNER to roster names + none,
+    // and COVERAGE to covered | adjacent | uncovered.
+    let owner_options = roster
+        .iter()
+        .map(|name| format!("\"{}\"", name.to_lowercase()))
+        .chain(std::iter::once("\"none\"".to_string()))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    let grammar = format!(
+        "root ::= \"SUBJECT: \" subject \"\\nREASON: \" reason \"\\nCOVERAGE: \" coverage \"\\nOWNER: \" owner \"\\n\"\n\
+         subject ::= [^\\n]{{3,60}}\n\
+         reason ::= [^\\n]{{5,180}}\n\
+         coverage ::= \"covered\" | \"adjacent\" | \"uncovered\"\n\
+         owner ::= {}\n",
+        owner_options
+    );
+
+    // Build request payload using Ulpia's zero-dependency json::Value
+    let mut root_val = crate::json::Value::obj();
+    let mut msg = crate::json::Value::obj();
+    msg.set("role", crate::json::Value::Str("user".into()));
+    msg.set("content", crate::json::Value::Str(dossier.to_string()));
+    root_val.set("messages", crate::json::Value::Arr(vec![msg]));
+    root_val.set("temperature", crate::json::Value::Num(0.0));
+    root_val.set("max_tokens", crate::json::Value::Num(160.0));
+    root_val.set("grammar", crate::json::Value::Str(grammar));
+
+    let mut kwargs = crate::json::Value::obj();
+    kwargs.set("enable_thinking", crate::json::Value::Bool(false));
+    root_val.set("chat_template_kwargs", kwargs);
+
+    let body = root_val.to_string();
+
+    // Fast connection timeout: if server is down, fail fast into fallback in <= 250ms
+    let addr = format!("{}:{}", host, port);
+    let socket_addr = addr.to_socket_addrs().ok()?.next()?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(250)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(4000))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_millis(1000))).ok()?;
+
+    let request = format!(
+        "POST {} HTTP/1.1\r\n\
+         Host: {}:{}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        path, host, port, body.len(), body
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+
+    let mut response_bytes = Vec::new();
+    stream.read_to_end(&mut response_bytes).ok()?;
+    let response = String::from_utf8_lossy(&response_bytes);
+
+    let (headers, raw_body) = if let Some(parts) = response.split_once("\r\n\r\n") {
+        parts
+    } else if let Some(parts) = response.split_once("\n\n") {
+        parts
+    } else {
+        return None;
+    };
+
+    let first_line = headers.lines().next().unwrap_or("");
+    if !first_line.contains(" 200") {
+        return None;
+    }
+
+    let body_str = if headers.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        decode_chunked(raw_body)
+    } else {
+        raw_body.to_string()
+    };
+
+    let json_val = crate::json::parse(body_str.trim()).ok()?;
+    let choices = match json_val.get("choices") {
+        Some(crate::json::Value::Arr(arr)) => arr,
+        _ => return None,
+    };
+    let message = choices.first()?.get("message")?;
+    let content = match message.get("content") {
+        Some(crate::json::Value::Str(s)) => s,
+        _ => return None,
+    };
+
+    parse(content, roster)
+}
+
+fn decode_chunked(raw: &str) -> String {
+    let mut out = String::new();
+    let mut cur = raw;
+    while let Some((size_line, rest)) = cur.split_once("\r\n") {
+        let size_str = size_line.trim().split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_str, 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size {
+            out.push_str(rest);
+            break;
+        }
+        out.push_str(&rest[..size]);
+        let after = &rest[size..];
+        cur = after.strip_prefix("\r\n").unwrap_or(after);
+    }
+    out
+}
+
+
+/// The line a surface shows when the fleet has no owner for a subject.
+///
+/// **This is the sentence Richard asked for**, and the reason it lives here rather than in
+/// a caller is that every surface must say the same thing: the desk, the hook, and the
+/// reading room are three places one wrong answer could be worded three ways.
+pub fn coverage_note(v: &Verdict) -> Option<String> {
+    match v.coverage {
+        Coverage::Covered => None,
+        Coverage::Adjacent => Some(format!(
+            "VESTA: no agent owns {}. {} is the nearest, because {} Answering from there is \
+             a stretch, and the honest options are to give that agent the knowledge or to \
+             create an agent for this.",
+            if v.subject.is_empty() { "this subject".into() } else { v.subject.clone() },
+            v.owner.clone().unwrap_or_else(|| "no one".into()),
+            v.reason
+        )),
+        Coverage::Uncovered => Some(format!(
+            "VESTA: nothing in this fleet covers {}, and no agent is near enough to name. \
+             {} This is a gap in the fleet rather than a gap in the question: it is worth \
+             deciding whether an agent should exist for it.",
+            if v.subject.is_empty() { "this subject".into() } else { v.subject.clone() },
+            v.reason
+        )),
+    }
+}
+
+/// The deterministic choice, kept as the fallback and as the thing the classifier is
+/// measured against.
+pub fn fallback(choice: Option<AgentChoice>, why: FellBack) -> Option<Verdict> {
+    choice.map(|c| Verdict {
+        owner: Some(c.agent),
+        coverage: Coverage::Covered,
+        subject: String::new(),
+        reason: why.reason().into(),
+        // **No classifier, no panel, and this empty vector is the decision rather than an
+        // omission.** The deterministic side could be made to guess one from `margin` and
+        // `contenders`, and it must not: measured on this fleet's 49 question gold set on
+        // 2026-09-04, every single owner question has 2 to 10 contenders and no margin cut
+        // separates them, so any arithmetic rule convenes panels on questions that have one
+        // owner. The cost is asymmetric and that is what settles it. A panel this fleet
+        // failed to convene costs one review nobody had. A panel it convened wrongly costs
+        // about 206,000 tokens and three agents' attention, measured the same day. When the
+        // instrument cannot tell, the cheap error is the one to make.
+        reviewers: Vec::new(),
+    })
+}
+
+/// Why the deterministic choice is answering instead of a model.
+///
+/// **The two cases must not share a sentence.** The previous version said "no classifier
+/// configured" for both, so a fleet whose classifier was configured and dead reported
+/// itself as a fleet that had never asked for one. That is the same failure as running a
+/// stale binary and reporting the feature it did not contain: a message asserting
+/// something it never checked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FellBack {
+    /// `fleet.txt` names no classifier. The deterministic sum is the whole router, which
+    /// is a supported configuration and not a fault.
+    NotConfigured,
+    /// A classifier is configured and did not answer: not installed, not running, timed
+    /// out, or it named an agent off the roster. Routing continues, worse, and silently
+    /// unless somebody is told.
+    DidNotAnswer,
+}
+
+impl FellBack {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "chosen by keyword score, with no classifier configured",
+            Self::DidNotAnswer => {
+                "chosen by keyword score, because the configured classifier did not answer"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    fn roster() -> Vec<String> {
+        ["zed", "steve", "apelles", "cicero", "aldus"].iter().map(|s| s.to_string()).collect()
+    }
+
+    fn verdict(reviewers_line: &str) -> Verdict {
+        let reply = format!(
+            "SUBJECT: landing page copy
+REASON: it sells and it claims
+COVERAGE: covered
+OWNER: steve
+REVIEWERS: {reviewers_line}
+"
+        );
+        parse(&reply, &roster()).expect("a verdict")
+    }
+
+    /// The normal answer, and the prompt says so first, because a panel costs about 69,000
+    /// tokens per reviewer measured against real subagents.
+    #[test]
+    fn none_is_a_panel_of_nobody_and_so_is_a_missing_line() {
+        assert!(verdict("none").reviewers.is_empty());
+        assert!(verdict("").reviewers.is_empty());
+        assert!(verdict("-").reviewers.is_empty());
+    }
+
+    /// The wrapper script that drives the classifier is not versioned with the binary, so a
+    /// model answering the four lines it used to be asked for must still produce a verdict.
+    /// Anything else turns a prompt change into a fleet that stops routing.
+    #[test]
+    fn a_reply_with_no_reviewers_line_at_all_is_still_a_verdict() {
+        let v = parse(
+            "SUBJECT: nutrition
+REASON: it is about food
+COVERAGE: covered
+OWNER: zed
+",
+            &roster(),
+        )
+        .expect("four lines still parse");
+        assert_eq!(v.owner.as_deref(), Some("zed"));
+        assert!(v.reviewers.is_empty());
+    }
+
+    #[test]
+    fn a_reviewer_is_read_with_what_it_is_being_asked_to_check() {
+        let v = verdict("zed: whether the latency figure is true; apelles: whether it says what we are");
+        assert_eq!(v.reviewers.len(), 2);
+        assert_eq!(v.reviewers[0].agent, "zed");
+        assert_eq!(v.reviewers[0].why, "whether the latency figure is true");
+        assert_eq!(v.reviewers[1].agent, "apelles");
+    }
+
+    /// Every surface downstream treats a named agent as real, and `kb panel` would refuse
+    /// this name later, after the owner had already been told to convene it.
+    #[test]
+    fn a_name_that_is_not_in_the_fleet_is_dropped_rather_than_passed_on() {
+        let v = verdict("zed: true; goldoni: pacing; nobody: nothing");
+        assert_eq!(v.reviewers.len(), 1, "{:?}", v.reviewers);
+        assert_eq!(v.reviewers[0].agent, "zed");
+    }
+
+    /// An objection from the owner is a revision. The prompt asks for this and this
+    /// enforces it, because a rule a prompt asks for is a rule a model follows most of the
+    /// time.
+    #[test]
+    fn the_owner_is_never_seated_on_the_panel_for_their_own_work() {
+        let v = verdict("steve: whether it converts; zed: whether it is true");
+        assert_eq!(v.reviewers.len(), 1);
+        assert_eq!(v.reviewers[0].agent, "zed");
+    }
+
+    /// A fourth reviewer is another 69,000 tokens. The verdict is truncated rather than
+    /// refused, because a verdict that named four judged the message correctly and only
+    /// overspent, and throwing it away would lose the first three.
+    #[test]
+    fn a_panel_is_capped_and_the_first_three_survive() {
+        let v = verdict("zed: a; apelles: b; cicero: c; aldus: d");
+        assert_eq!(v.reviewers.len(), MAX_PANEL);
+        assert_eq!(
+            v.reviewers.iter().map(|r| r.agent.as_str()).collect::<Vec<_>>(),
+            vec!["zed", "apelles", "cicero"]
+        );
+    }
+
+    #[test]
+    fn a_name_repeated_is_seated_once() {
+        assert_eq!(verdict("zed: a; zed: b").reviewers.len(), 1);
+    }
+
+    /// Models decorate, and the owner field already had to learn this.
+    #[test]
+    fn decoration_around_a_name_does_not_hide_it() {
+        let v = verdict("**zed**: whether it is true");
+        assert_eq!(v.reviewers.len(), 1, "{:?}", v.reviewers);
+        assert_eq!(v.reviewers[0].agent, "zed");
+    }
+
+    /// No classifier means no panel, and that is the decision rather than an omission: no
+    /// margin cut separates a two domain question from a one domain question, and the cost
+    /// of guessing wrong is about 206,000 tokens against one review nobody had.
+    #[test]
+    fn the_deterministic_fallback_never_convenes_a_panel() {
+        let choice = crate::memory::AgentChoice {
+            agent: "zed".into(),
+            score: 90.0,
+            files: 2,
+            margin: 1.02,
+            contenders: 6,
+            totals: vec![("zed".into(), 90.0), ("steve".into(), 88.0)],
+        };
+        let v = fallback(Some(choice), FellBack::NotConfigured).expect("a fallback verdict");
+        assert!(
+            v.reviewers.is_empty(),
+            "a margin of 1.02 across six contenders is exactly the shape that looks like a              panel and measures as an ordinary single owner question"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roster() -> Vec<String> {
+        vec!["aldo".into(), "steve".into(), "yaron".into(), "zed".into()]
+    }
+
+    fn evidence(n: usize) -> Vec<Retrieved> {
+        (0..n)
+            .map(|i| Retrieved {
+                base: "zed".into(),
+                path: format!("knowledge/systems/a-file-with-a-realistic-name-{i}.md"),
+                layer: crate::retrieve::Layer::Long,
+                title: String::new(),
+                purpose: String::new(),
+                score: 0.0,
+                keyword_score: 15.0,
+                why: vec![],
+                matched: vec!["deploy".into(), "monitoring".into()],
+                passages: vec![],
+            })
+            .collect()
+    }
+
+    /// **That the prefix cannot contain the message is the compiler's job, not this
+    /// test's**: `stable_prefix` is not handed the question, so no edit can put one there
+    /// without changing a signature. What no signature can check is how much is left on
+    /// the variable side, and that is what decides whether caching the prefix pays.
+    ///
+    /// The measured prefix on this fleet is about 550 tokens. A tail that grew past it
+    /// would mean most of each message is recomputed anyway and the split stopped earning
+    /// its complexity. The number is a tripwire rather than a target.
+    ///
+    /// **It fired once, on 2026-08-20, and the limit moved rather than the code.** The tail
+    /// gained two things that turn a list of paths into evidence a reader can weigh: an
+    /// `about:` line per file saying what it is for, and a paragraph carrying what retrieval
+    /// thinks of its own answer. 1400 characters became 1489. Both earn their room, and 1800
+    /// was still roughly 450 tokens against a 550 token prefix.
+    ///
+    /// Raised again to 2200 on 2026-08-21, when ADR-0031 added the species table, and this
+    /// time the halves are roughly equal rather than prefix-heavy. Taken with eyes open:
+    /// the table IS the coverage judgement stated as data (knows about it, knows how, has
+    /// the means, per agent), which is the one judgement the classifier exists to make, so
+    /// it outranks everything else in the tail for its cost. Caching the prefix still pays;
+    /// what stops paying at this size is adding anything more, and the next addition should
+    /// evict something instead of raising this number a third time.
+    #[test]
+    fn the_variable_half_stays_small_enough_for_caching_the_other_half_to_pay() {
+        let tail = variable_tail(
+            "como faco deploy com zero downtime e monitoramento de infra",
+            &evidence(5),
+            crate::memory::Confidence {
+                verdict: crate::memory::Verdict::Hit,
+                agreement: 2,
+                keyword_score: 40.0,
+                margin: 2.0,
+                floor: crate::memory::SCORE_FLOOR,
+            },
+            // A realistic species table, so the budget below is measured against the tail
+            // as it actually ships and not against a version with the block missing.
+            &[
+                ("zed".into(), [40.0, 12.5, 8.0]),
+                ("steve".into(), [21.0, 0.0, 5.5]),
+                ("yaron".into(), [11.0, 0.0, 0.0]),
+                ("aldus".into(), [7.5, 3.0, 0.0]),
+            ],
+        );
+        assert!(
+            tail.len() < 2200,
+            "the variable tail grew to {} chars; caching the prefix stops paying",
+            tail.len()
+        );
+        assert!(tail.contains("zero downtime"), "the message belongs on the variable side");
+    }
+
+    #[test]
+    fn a_clean_verdict_parses() {
+        let v = parse(
+            "OWNER: zed\nCOVERAGE: covered\nSUBJECT: routing architecture\nREASON: it is about the router.",
+            &roster(),
+        )
+        .expect("parses");
+        assert_eq!(v.owner.as_deref(), Some("zed"));
+        assert_eq!(v.coverage, Coverage::Covered);
+        assert_eq!(v.subject, "routing architecture");
+    }
+
+    /// The case the whole module exists for: a subject nobody owns, with the nearest
+    /// agent named and the gap reported instead of hidden behind a confident owner.
+    #[test]
+    fn an_uncovered_subject_names_the_nearest_agent_and_says_it_is_a_gap() {
+        let v = parse(
+            "OWNER: zed\nCOVERAGE: adjacent\nSUBJECT: devops and infrastructure\n\
+             REASON: zed owns building software but not running it.",
+            &roster(),
+        )
+        .expect("parses");
+        assert_eq!(v.coverage, Coverage::Adjacent);
+        let note = coverage_note(&v).expect("a note");
+        assert!(note.contains("no agent owns devops and infrastructure"));
+        assert!(note.contains("create an agent"), "the person is offered the real option");
+    }
+
+    /// A model naming an agent that does not exist must not produce a route: every
+    /// surface downstream treats the owner as real.
+    #[test]
+    fn an_invented_agent_is_not_an_owner() {
+        let v = parse("OWNER: devops\nCOVERAGE: covered\nSUBJECT: x\nREASON: y", &roster())
+            .expect("parses");
+        assert_eq!(v.owner, None, "a name off the roster is no owner at all");
+    }
+
+    #[test]
+    fn a_model_that_answered_with_prose_is_not_a_verdict() {
+        assert!(parse("I think Zed should handle this one.", &roster()).is_none());
+    }
+
+    /// Models decorate. The parser takes the field however it is dressed.
+    #[test]
+    fn markdown_and_case_do_not_break_the_parse() {
+        let v = parse(
+            "**OWNER:** Zed\n**COVERAGE:** Covered\nSUBJECT: the router\nREASON: because.",
+            &roster(),
+        )
+        .expect("parses");
+        assert_eq!(v.owner.as_deref(), Some("zed"));
+        assert_eq!(v.coverage, Coverage::Covered);
+    }
+
+    fn choice(name: &str, totals: &[(&str, f64)]) -> AgentChoice {
+        let score = totals.iter().find(|(n, _)| *n == name).map(|(_, w)| *w).unwrap_or(0.0);
+        AgentChoice {
+            agent: name.into(),
+            score,
+            files: 1,
+            margin: 2.0,
+            contenders: totals.len(),
+            totals: totals.iter().map(|(n, w)| (n.to_string(), *w)).collect(),
+        }
+    }
+
+    /// One agent holding the field needs no model. Two agents sharing it do, and so
+    /// does a field with nothing in it, which is the case the whole module exists for.
+    #[test]
+    fn the_cascade_escalates_exactly_when_the_arithmetic_is_not_alone() {
+        use crate::memory::Verdict as V;
+        assert!(
+            is_uncontested(Some(&choice("zed", &[("zed", 90.0), ("steve", 5.0)])), V::Hit),
+            "one agent holding the field stands alone"
+        );
+        assert!(
+            !is_uncontested(Some(&choice("zed", &[("zed", 55.0), ("steve", 45.0)])), V::Hit),
+            "a contested field is worth a model"
+        );
+        assert!(
+            !is_uncontested(None, V::Hit),
+            "nothing scoring is not clarity, it is the DevOps case"
+        );
+        assert!(
+            !is_uncontested(Some(&choice("zed", &[("zed", 90.0)])), V::Guess),
+            "below the floor the arithmetic never stands alone"
+        );
+    }
+
+    #[test]
+    fn no_classifier_configured_means_no_verdict_and_no_error() {
+        assert!(run(&Classifier::None, Path::new("."), "x", &roster()).is_none());
+    }
+
+    #[test]
+    fn a_command_that_does_not_exist_falls_back_rather_than_failing() {
+        let c = Classifier::Command("this-binary-does-not-exist-4114".into());
+        assert!(run(&c, Path::new("."), "x", &roster()).is_none());
+    }
+
+    #[test]
+    fn an_http_endpoint_that_is_down_falls_back_fast_rather_than_failing() {
+        let c = Classifier::Http("http://127.0.0.1:59999/v1/chat/completions".into());
+        assert!(run(&c, Path::new("."), "x", &roster()).is_none());
+    }
+
+    #[test]
+    fn classifier_from_manifest_parses_http_and_command() {
+        assert_eq!(
+            Classifier::from_manifest("http://127.0.0.1:4115"),
+            Classifier::Http("http://127.0.0.1:4115".into())
+        );
+        assert_eq!(
+            Classifier::from_manifest("http://localhost:4115/v1/chat/completions"),
+            Classifier::Http("http://localhost:4115/v1/chat/completions".into())
+        );
+        assert_eq!(
+            Classifier::from_manifest("tools/classify-local.cmd"),
+            Classifier::Command("tools/classify-local.cmd".into())
+        );
+        assert_eq!(Classifier::from_manifest("   "), Classifier::None);
+    }
+}
+

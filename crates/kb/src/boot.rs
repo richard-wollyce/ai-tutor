@@ -1,0 +1,1745 @@
+//! The fleet deciding who answers, instead of a file asking the model to decide.
+//!
+//! **What this replaces.** The public `CLAUDE.md` carried a static conditional: when
+//! `fleet/zed/` is here, read its `CLAUDE.md` and follow it instead. That names one agent
+//! literally, never reads the question, and puts the choice in the hands of whichever
+//! model happened to read the file. Ask it about protein and you still get the architect.
+//!
+//! Richard's correction, and it is the right one: a model should not read a file to learn
+//! who it is. It should be **plugged into the software**, the way an integration is handed
+//! its tools after it authenticates, and the software decides how it runs.
+//!
+//! ## The mechanism, which is the whole point
+//!
+//! The runtime exposes a `UserPromptSubmit` hook. It runs a command **before the model
+//! sees the message**, hands it the prompt as JSON on stdin, and injects whatever the
+//! command prints to stdout into the model's context. Confirmed against the hook
+//! reference on 2026-08-18: stdout is added as context for `UserPromptSubmit`,
+//! `UserPromptExpansion` and `SessionStart` specifically, exit 0 means the context is
+//! added, and the timeout for this event is 30 seconds.
+//!
+//! So the direction of control inverts. The router runs first, unconditionally, and the
+//! model receives an identity it did not choose. That is the difference between reading a
+//! rule and being handed one, and it is why this lives in a hook rather than in prose.
+//!
+//! ## Why the constitution is not injected every message
+//!
+//! It is roughly 55 KB. Emitting it on every turn would spend the context window on
+//! repetition and would make the router the most expensive thing in the loop.
+//!
+//! `UserPromptSubmit` fires per message, so this **emits the constitution only when the
+//! routed agent changes**, tracked per session id under `.kb/sessions/`. That is ADR-0020's
+//! Option B implemented honestly: Vesta routes, hands off, and leaves, and the only reason
+//! it comes back is that the conversation changed domain, which was Option B's named
+//! failure mode. Handling it costs one file read.
+//!
+//! ## What it does when it does not know
+//!
+//! It says so and emits the roster instead of picking. A router that always picks is the
+//! failure ADR-0013 spent a day measuring: silently answering from the wrong base is worse
+//! than admitting the question is not covered. The gate from ADR-0020 decides, and below
+//! it nothing is handed over as identity.
+
+use std::path::{Path, PathBuf};
+
+use crate::json;
+use crate::fleet;
+use crate::memory::{Memory, Verdict};
+
+/// What a host handed us on stdin.
+pub struct Request {
+    pub prompt: String,
+    /// The conversation this message belongs to, when the host names one.
+    ///
+    /// **`None` is a real state and not a missing value.** It used to be the string
+    /// `"unknown"`, which made every host that does not number its conversations share one
+    /// cache file, so two unrelated sessions suppressed each other's constitution and each
+    /// one was handed an identity the other had chosen. `None` means no cache: nothing is
+    /// read, nothing is written, and the constitution is emitted every time. The cost is
+    /// one extra injection per message, which is exactly the blast radius `session_file`
+    /// already declares acceptable for this cache.
+    pub session: Option<String>,
+    /// The directory the host is working in, used as the fleet root when no path was
+    /// named on the command line. Read by `cmd_boot`, not here.
+    pub cwd: Option<PathBuf>,
+}
+
+/// Parses whatever arrived on stdin, in either shape this command accepts.
+///
+/// ## Two shapes, because one adapter is a claim and two are a demonstration
+///
+/// A host that exposes a prompt hook sends a JSON envelope. A host that does not, which is
+/// every shell, every editor and every runtime that is not this one, has a message and
+/// nothing else. Accepting only the first made the router a feature of one vendor's
+/// product; accepting both makes an adapter for a new host `echo "$msg" | kb boot .`.
+///
+/// ## How the two are told apart, and where that is wrong
+///
+/// The first non-space byte is tested for `{`. That alone is not enough, because a person
+/// can type a brace, so the text must also parse as JSON **and** carry at least one field
+/// this envelope is known to have. Everything else is the message, verbatim.
+///
+/// **The failure mode, named rather than hidden:** a message that is itself a valid JSON
+/// object with a top-level `prompt`, `session_id`, `cwd` or `hook_event_name` is read as an
+/// envelope. Concretely, asking about a hook payload by pasting one and nothing else routes
+/// on the value of its `prompt` key instead of on the paste. The escape hatch is
+/// `--text`, which skips this test entirely and is what an adapter that never speaks JSON
+/// should pass, so the ambiguity exists only for a caller that opted into the sniff.
+///
+/// Anything unparseable is `None` rather than an error. A boot step that fails closed and
+/// silent is strictly better than one that fails loud and blocks the conversation.
+pub fn parse_request(stdin: &str) -> Option<Request> {
+    parse_envelope(stdin).or_else(|| parse_text(stdin))
+}
+
+/// The message alone, with no envelope around it. What every host that is not this one has.
+pub fn parse_text(stdin: &str) -> Option<Request> {
+    match stdin.trim().is_empty() {
+        // Nothing was typed, so there is nothing to route and nothing to say about it. The
+        // roster belongs to an empty prompt inside an envelope, which is a session opening,
+        // and that is a different event with a different right answer.
+        true => None,
+        false => Some(Request { prompt: stdin.to_string(), session: None, cwd: None }),
+    }
+}
+
+/// The hook payload, when stdin is one.
+///
+/// Every field is optional on purpose. The contract belongs to somebody else's runtime: it
+/// can gain fields, rename them, or hand us something else entirely on a version bump, and
+/// a hook that panics on an unexpected payload takes the user's message down with it.
+fn parse_envelope(stdin: &str) -> Option<Request> {
+    if !stdin.trim_start().starts_with('{') {
+        return None;
+    }
+    let v = json::parse(stdin).ok()?;
+    // The evidence that this is an envelope and not a message shaped like one.
+    if !["prompt", "session_id", "hook_event_name", "cwd"].iter().any(|k| v.get(k).is_some()) {
+        return None;
+    }
+    let prompt = v.get("prompt").and_then(|p| p.as_str()).unwrap_or("").to_string();
+    let session = v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let cwd = v.get("cwd").and_then(|c| c.as_str()).map(PathBuf::from);
+    Some(Request { prompt, session, cwd })
+}
+
+/// Where the last routed agent for a session is remembered.
+///
+/// Under `.kb/`, which is already derived, already gitignored, and already declared
+/// disposable by ADR-0003. Losing it costs one extra constitution injection, which is the
+/// correct blast radius for a cache.
+fn session_file(root: &Path, session: &str) -> PathBuf {
+    root.join(".kb").join("sessions").join(safe_session(session))
+}
+
+/// The session id, made safe to be a file name.
+///
+/// The id comes from outside, so it is not allowed to be a path. Anything that is not
+/// plainly alphanumeric becomes an underscore, which makes traversal impossible rather
+/// than unlikely. Public because `capture` names its files by the same id and must not
+/// grow a second opinion about what is safe.
+pub fn safe_session(session: &str) -> String {
+    session
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect()
+}
+
+pub fn last_agent_of(root: &Path, session: &str) -> Option<String> {
+    last_agent(root, session)
+}
+
+fn last_agent(root: &Path, session: &str) -> Option<String> {
+    std::fs::read_to_string(session_file(root, session)).ok().map(|s| s.trim().to_string())
+}
+
+fn remember_agent(root: &Path, session: &str, agent: &str) {
+    let path = session_file(root, session);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, agent);
+}
+
+/// What the model is handed, before it has read anything.
+pub struct Briefing {
+    /// The agent the fleet chose, if it was confident enough to choose one.
+    pub agent: Option<String>,
+    /// The agents that must object before this work ships, when the router judged the
+    /// message to land in more than one domain. Empty is the normal answer.
+    ///
+    /// **A panel is not a different kind of routing, it is an owner plus reviewers**, which
+    /// is why this sits beside `agent` rather than replacing it. The objection round has one
+    /// accountable owner by construction, the session file already remembers exactly one
+    /// agent, and a type that could hold two owners would be a type that can express the
+    /// committee this protocol exists to refuse.
+    pub panel: Vec<crate::classify::Reviewer>,
+    /// True when the constitution is included, which happens on the first message of a
+    /// session and whenever the routed agent changes under the conversation.
+    pub switched: bool,
+    pub text: String,
+}
+
+/// Removes one kind of envelope, `open` to `close`, wherever it appears.
+///
+/// An unterminated block is treated as running to the end of the text: a truncated
+/// envelope is still an envelope, and the alternative is to keep half a machine message
+/// and score it as if a person had typed it.
+fn strip_blocks(text: &str, open: &str, close: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(i) = rest.find(open) else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..i]);
+        let after = &rest[i + open.len()..];
+        let Some(j) = after.find(close) else { return out };
+        rest = &after[j + close.len()..];
+    }
+}
+
+/// The runtime's own envelopes, taken out before the prompt is judged to be a question.
+///
+/// **Stripping, not matching.** A substring test for the notification marker would also
+/// silence a real message that quotes a notification in order to ask about it, which is
+/// how this defect was reported in the first place. What survives the envelopes is what
+/// the person actually typed, and if nothing survives then nothing was asked.
+pub fn without_machine_blocks(prompt: &str) -> String {
+    let s = strip_blocks(prompt, "<system-reminder>", "</system-reminder>");
+    strip_blocks(&s, "<task-notification>", "</task-notification>")
+}
+
+/// Decomposes a compound or multi-clause prompt into atomic sub-questions.
+/// Splits on punctuation marks (?, ;, newlines) and multi-clause conjunctions
+/// (e.g. " e como ", " and what ", " alem disso ", " furthermore ").
+pub fn decompose_query(prompt: &str) -> Vec<String> {
+    let clean = prompt.trim();
+    if clean.is_empty() {
+        return Vec::new();
+    }
+
+    // Punctuation split: newlines, semicolons, question marks
+    let mut clauses: Vec<String> = Vec::new();
+    for line in clean.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        for chunk in line.split(&['?', ';', '!'][..]) {
+            let chunk = chunk.trim();
+            if !chunk.is_empty() {
+                clauses.push(chunk.to_string());
+            }
+        }
+    }
+
+    // Conjunction patterns within clauses
+    let conjunctions = [
+        " e como ",
+        " e qual ",
+        " e quanto ",
+        " e onde ",
+        " e por que ",
+        " e quem ",
+        " alem disso ",
+        " além disso ",
+        " and how ",
+        " and what ",
+        " and why ",
+        " and where ",
+        " and when ",
+        " and who ",
+        " furthermore ",
+        " moreover ",
+    ];
+
+    let mut expanded = Vec::new();
+    for clause in clauses {
+        let mut sub_parts = vec![clause];
+        for conj in &conjunctions {
+            let mut next_parts = Vec::new();
+            for part in sub_parts {
+                let lower = part.to_lowercase();
+                if let Some(idx) = lower.find(conj) {
+                    let first = part[..idx].trim().to_string();
+                    let second = part[idx + conj.len() - conj.trim_start().len()..].trim().to_string();
+                    if !first.is_empty() {
+                        next_parts.push(first);
+                    }
+                    if !second.is_empty() {
+                        next_parts.push(second);
+                    }
+                } else {
+                    next_parts.push(part);
+                }
+            }
+            sub_parts = next_parts;
+        }
+        expanded.extend(sub_parts);
+    }
+
+    // Filter and clean sub-parts
+    let filtered: Vec<String> = expanded
+        .into_iter()
+        .map(|s| {
+            let mut t = s.trim();
+            if let Some(rest) = t.strip_prefix("and ") {
+                t = rest.trim();
+            } else if let Some(rest) = t.strip_prefix("e ") {
+                t = rest.trim();
+            }
+            t.trim_matches(|c: char| !c.is_alphanumeric() && c != ' ' && c != '?').trim().to_string()
+        })
+        .filter(|s| s.chars().count() >= 10 && s.split_whitespace().count() >= 2)
+        .collect();
+
+    if filtered.is_empty() {
+        vec![clean.to_string()]
+    } else {
+        filtered
+    }
+}
+
+/// Routes one message and produces what the runtime should inject.
+pub fn brief(memory: &Memory, root: &Path, req: &Request, top: usize) -> Briefing {
+    // An empty prompt is a session opening rather than a question. Routing it would rank
+    // files against nothing and pick whichever base is largest.
+    if req.prompt.trim().is_empty() {
+        return Briefing { agent: None, panel: Vec::new(), switched: false, text: roster(memory) };
+    }
+
+    // **Machine text is not a question.** The runtime submits background task
+    // notifications on this same hook, in the same field, so without this the router
+    // ranked files against "a background command has completed" and paid a classifier
+    // subprocess to decide who owns it. Observed over three consecutive notifications it
+    // answered zed, then zed with a caveat, then nobody: three different answers to a
+    // question nobody asked.
+    //
+    // **Silence, not the roster.** The last routed agent's constitution is still in the
+    // conversation, so emitting nothing leaves whoever was working still working, which
+    // is the only correct response to a notification. It also leaves the session's
+    // remembered agent untouched, because nothing below this line runs. The roster above
+    // is for a session opening, which is a different event with a different right answer.
+    let asked = without_machine_blocks(&req.prompt);
+    if asked.trim().is_empty() {
+        return Briefing { agent: None, panel: Vec::new(), switched: false, text: String::new() };
+    }
+
+    // Everything downstream scores `asked` rather than the raw prompt, so an envelope
+    // appended to a real question cannot contribute its vocabulary to the ranking.
+    let answer = memory.ask(&asked, top);
+
+    // **This surface counted nothing, and it is the one every message passes through.**
+    // Six other surfaces asked the contract whether the question was a recall loss;
+    // this one asked `ask` and moved on, so the most frequent refusal there is entered
+    // no log. It was deferred until the log could take two writers at once, because a
+    // hook runs under the concurrency ADR-0021 describes; `misses::record` now holds a
+    // marker while it merges. The loss also goes into the session's own record, which
+    // is what `kb capture` turns into a deposit at session end. ADR-0035.
+    //
+    // The session's record is skipped when the host named no session, because a deposit is
+    // filed under a session id and `kb capture` is asked for one by name. There is nothing
+    // to file it under, and inventing a name would put one host's refusals into whatever
+    // the next caller happened to ask for. The fleet-wide miss log above is unaffected.
+    if let Some(loss) = memory.recall_loss(&asked, &answer.confidence) {
+        if let Some(session) = &req.session {
+            crate::capture::note_refused(root, session, &loss.question, &loss.looked_like);
+        }
+    }
+
+    // **Retrieval is code; choosing who answers is a judgement.** ADR-0013 said so and
+    // this is where it finally holds: the deterministic sum is now the fallback, and a
+    // model reads the roster and the evidence when one is configured. It sees a dossier
+    // of roughly three hundred tokens and never the corpus, so it cannot invent a file,
+    // and its answer is a name from a list it was handed.
+    let classifier = memory.classifier();
+    let roster_names = memory.roster();
+
+    // **The cascade was built, measured and rejected. See `classify::is_uncontested`.**
+    // The classifier is consulted on every message, because the one signal a cascade
+    // could gate on is the deterministic score, and the deterministic score does not
+    // know when it is wrong. That is the whole reason this module exists.
+    let verdict = crate::classify::run(
+        &classifier,
+        root,
+        &crate::classify::dossier(memory, &asked, &answer.found, answer.confidence),
+        &roster_names,
+    )
+    .or_else(|| {
+        // No classifier, or it could not be reached. The deterministic choice stands,
+        // gated by the floor exactly as before, so the fleet keeps routing when a model
+        // is unavailable rather than stopping. Which of the two happened is carried
+        // forward, because a configured classifier that is not answering is a fault and
+        // a fleet without one is not.
+        let why = match classifier {
+            crate::classify::Classifier::None => crate::classify::FellBack::NotConfigured,
+            _ => crate::classify::FellBack::DidNotAnswer,
+        };
+        match answer.confidence.verdict {
+            Verdict::Hit => crate::classify::fallback(answer.agent.clone(), why),
+            _ => None,
+        }
+    });
+
+    // A subject nobody owns is reported, not routed. This is the state arithmetic could
+    // never express: a score of zero says "no match" and never says "no one here does
+    // this kind of work".
+    if let Some(v) = &verdict {
+        if let Some(note) = crate::classify::coverage_note(v) {
+            // **And it is reported to a log as well as to the conversation, which it was
+            // not.** The briefing below is text injected into one session's context and it
+            // dies with that session: on 2026-09-04 an abstention on landing page copy
+            // produced a wrong report about the fleet's own roster and left no trace
+            // anywhere, surfacing only because Richard remembered the agent existed.
+            // `kb-misses.txt` could not hold it, because that log only records a question
+            // the library answered nothing for and this one scored; `kb-misroutes.txt`
+            // could not either, because that log is filed by the agent that was handed the
+            // message and the whole state here is that no agent was. See `crate::abstain`.
+            //
+            // Ignored on failure, deliberately. `brief` runs on `UserPromptSubmit`, so a
+            // log that cannot be written costs the evidence and never the conversation.
+            let today = crate::misses::today();
+            if let Some(gap) = crate::abstain::Abstention::of(v, answer.agent.as_ref(), &today) {
+                let _ = crate::abstain::record(root, &gap.about(&asked), &today);
+            }
+
+            let nearest = v
+                .owner
+                .as_ref()
+                .map(|o| format!(
+                    "\n\nIf you answer anyway, answer as {o} and say plainly that this is \
+                     outside the fleet's covered ground.\n"
+                ))
+                .unwrap_or_default();
+            return Briefing {
+                agent: None,
+                panel: Vec::new(),
+                switched: false,
+                text: format!("{note}{nearest}\n{}", roster(memory)),
+            };
+        }
+    }
+
+    // **Say it out loud when a configured classifier is not answering.** The fallback is
+    // good enough that nothing looks broken: routing continues, an agent is named, and
+    // the only symptom is worse choices. That is how a stale binary ran for a day with
+    // the classifier compiled out of it while the surface reported it working. Degraded
+    // and silent is the combination that costs the most to find.
+    let degraded = verdict
+        .as_ref()
+        .is_some_and(|v| v.reason == crate::classify::FellBack::DidNotAnswer.reason());
+
+    let mut chosen = verdict.as_ref().and_then(|v| v.owner.clone());
+    let mut panel: Vec<crate::classify::Reviewer> =
+        verdict.as_ref().map(|v| v.reviewers.clone()).unwrap_or_default();
+
+    let subqueries = decompose_query(&asked);
+    let mut decomposition_note = String::new();
+
+    if subqueries.len() > 1 {
+        let mut sub_routed: Vec<(String, String)> = Vec::new();
+        for sub in &subqueries {
+            let sub_ans = memory.ask(sub, top);
+            if sub_ans.confidence.verdict == Verdict::Hit {
+                if let Some(agent_choice) = sub_ans.agent {
+                    let agent_name = agent_choice.agent;
+                    if !sub_routed.iter().any(|(a, _)| a.eq_ignore_ascii_case(&agent_name)) {
+                        sub_routed.push((agent_name, sub.clone()));
+                    }
+                }
+            }
+        }
+
+        if sub_routed.len() > 1 {
+            if chosen.is_none() {
+                chosen = Some(sub_routed[0].0.clone());
+            }
+            let primary = chosen.clone().unwrap_or_else(|| sub_routed[0].0.clone());
+            for (sub_agent, sub_q) in &sub_routed {
+                if !sub_agent.eq_ignore_ascii_case(&primary)
+                    && !panel.iter().any(|r| r.agent.eq_ignore_ascii_case(sub_agent))
+                {
+                    panel.push(crate::classify::Reviewer {
+                        agent: sub_agent.clone(),
+                        why: format!("cross-domain sub-question: {sub_q}"),
+                    });
+                }
+            }
+            decomposition_note = format!(
+                "VESTA: decomposed compound inquiry across {} domains:\n{}",
+                sub_routed.len(),
+                sub_routed
+                    .iter()
+                    .map(|(a, q)| format!("  - [{a}]: \"{q}\""))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+
+    let Some(agent) = chosen else {
+        // **No agent owns it, and that has two meanings the fleet used to run together.**
+        //
+        // A base with no `agent.txt` is read by the router and can never be chosen as the
+        // one who answers. Until now, evidence landing there produced the same sentence as
+        // evidence landing nowhere: *the base does not appear to cover it*. Those are
+        // different states. `general/` holds what the fleet knows without any agent owning
+        // it, and `person/` holds the human; when the answer is in one of them it is not a
+        // gap, it is Vesta's own.
+        //
+        // Richard's framing, and it is why this branch exists: *deveria existir uma base de
+        // conhecimento geral, que e a base em que a propria Vesta responde por conta propria
+        // ao inves de rotear para algum agente.*
+        let routable: Vec<&str> = memory
+            .agents
+            .iter()
+            .filter(|a| a.routable)
+            .map(|a| a.name.as_str())
+            .collect();
+        let mine: Vec<String> = answer
+            .found
+            .iter()
+            .filter(|f| !routable.iter().any(|r| r.eq_ignore_ascii_case(&f.base)))
+            .take(top)
+            .map(|f| format!("  {}/{}", f.base, f.path))
+            .collect();
+
+        if !mine.is_empty() && answer.confidence.verdict != Verdict::Nothing {
+            return Briefing {
+                agent: None,
+                panel: Vec::new(),
+                switched: false,
+                text: format!(
+                    "VESTA: no agent owns this and it does not need one. The library holds \
+                     it in a base that everyone reads and nobody answers for, so this one \
+                     is mine.\n\n\
+                     Answer as the fleet's librarian, from these, and say plainly if they \
+                     do not actually cover the question:\n{}\n",
+                    mine.join("\n")
+                ),
+            };
+        }
+
+        // **The parenthetical that used to be here read as "you nearly cleared it", on the
+        // path where nothing was measured at all.** It printed `(top keyword score 0.0,
+        // floor 6.9)` on every refusal, and a `Verdict::Nothing` arrives with a score of
+        // exactly zero because `index::route` keeps a hit only above zero: no term matched
+        // any key, so the floor was never reached and naming it sent the reader to
+        // recalibrate a threshold that did nothing. `Shortfall::lines` makes that branch
+        // once, for every surface, and names the floor only where it truly refused
+        // something, which on this path is the classifier's `Guess`.
+        //
+        // **Capped at two sentences, and the cap is the point.** `brief` runs on
+        // `UserPromptSubmit`, so whatever is here is injected into the model's context on
+        // every message the fleet cannot place: two sentences are two sentences forever.
+        // The roster stays last, and the instruction not to assume an agent stays above
+        // the remedies, because a refusal that leads with what to fix invites the model to
+        // answer anyway rather than say the fleet has no owner for this, which is the one
+        // thing this briefing exists to make it say.
+        let said = memory.shortfall(&answer.confidence).lines();
+        let state = match said.is_empty() {
+            true => String::new(),
+            false => format!("{}\n\n", said.into_iter().take(2).collect::<Vec<_>>().join(" ")),
+        };
+        return Briefing {
+            agent: None,
+            panel: Vec::new(),
+            switched: false,
+            text: format!(
+                "VESTA: routed this message and found no owner.\n\n\
+                 Do not assume an agent. Either ask which one this belongs to, or answer \
+                 as the fleet's librarian and say the base does not appear to cover \
+                 it.\n\n{state}{}",
+                roster(memory)
+            ),
+        };
+    };
+
+    // **No session named means no memory of one, which is why `switched` stays true.** A
+    // host that does not number its conversations cannot be told the constitution is
+    // already in the context, because nothing here knows whether it is. Emitting it is the
+    // only answer that is never wrong: the cost is repetition, and the alternative is an
+    // agent handed a name with none of the rules that go with it.
+    let previous = req.session.as_deref().and_then(|s| last_agent(root, s));
+
+    // **Stickiness was built here and removed on 2026-08-19, measured both times.**
+    //
+    // It existed because "yes, run it and measure" routed to the nutrition agent at
+    // 28.44 on the word "out" from a recipes file. The real cause was the stopword
+    // list, not the absence of an incumbent: completing the closed classes dropped
+    // "ok obrigado", "isso ai", "pode fazer" and "continua" to a score of **zero**,
+    // where the confidence floor already handles them and never changes the agent.
+    //
+    // What the incumbent rule did instead was freeze a wrong answer. Richard's
+    // session pinned to the marketing agent and stayed there through four messages
+    // about routing and interface design, because a challenger had to double the
+    // incumbent to take the conversation. The hook said "still steve" while he asked
+    // about the router. **A mechanism that needs the first answer to be right is not
+    // a correction mechanism.**
+    //
+    // Same shape as MIN_MARGIN and the corpus-share normalisation: reasoned into
+    // existence, then removed once the instrument had an opinion. The floor decides,
+    // and a message with nothing in it changes nothing.
+
+    let switched = previous.as_deref() != Some(agent.as_str());
+    if let Some(session) = &req.session {
+        remember_agent(root, session, &agent);
+        // Into the session's record as well, so the deposit `kb capture` writes at session
+        // end lands with whoever had the conversation last and can say where it went.
+        crate::capture::note_routed(root, session, &agent);
+    }
+
+    let files: Vec<String> = answer
+        .found
+        .iter()
+        .take(top)
+        .map(|f| format!("  {}/{}", f.base, f.path))
+        .collect();
+
+    let mut text = String::new();
+    if switched {
+        let agent_root = memory
+            .agents
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(&agent))
+            .map(|a| a.root.clone());
+
+        text.push_str(&format!(
+            "VESTA: this message routes to {agent}. You are {agent} for as long as that \
+             holds. This was decided by the fleet's router before you saw the message, \
+             not by a file you read, so it is not yours to override: if it is wrong, say \
+             so rather than answering as somebody else, and record it with `kb \
+             misroute`, naming the message with --chose {agent} and --owner, so the \
+             fleet keeps what you noticed instead of losing it with the \
+             conversation. That log is evidence and never an edit.\n\n"
+        ));
+
+        if let Some(agent_root) = agent_root {
+            if let Some(blocks) = crate::blocks::read(&agent_root) {
+                text.push_str(&crate::blocks::assemble(&agent_root, &blocks));
+                text.push_str("\n\n");
+            }
+        }
+        if let Some(prev) = previous {
+            text.push_str(&format!(
+                "(the conversation was with {prev} until this message)\n\n"
+            ));
+        }
+    } else {
+        text.push_str(&format!("VESTA: still {agent}.\n\n"));
+    }
+
+    if degraded {
+        text.push_str(
+            "VESTA: the configured classifier did not answer, so this was routed by \
+             keyword score alone. Routing is degraded, not stopped. Say so if the choice \
+             looks wrong.\n\n",
+        );
+    }
+
+    // Handoff continuity: if a recent handoff exists for this session or agent,
+    // inject its summary into the briefing.
+    let handoff = req
+        .session
+        .as_deref()
+        .and_then(|s| crate::handoff::load(root, s))
+        .or_else(|| {
+            if switched {
+                crate::handoff::latest(root)
+            } else {
+                None
+            }
+        });
+
+    if let Some(h) = handoff {
+        text.push_str(&h.format_for_briefing(2000));
+        text.push_str("\n\n");
+    }
+
+    if !decomposition_note.is_empty() {
+        text.push_str(&decomposition_note);
+        text.push_str("\n\n");
+    }
+
+    // **The panel, when the router judged there is one, and it is an instruction rather
+    // than a note.** The hook's only output channel is text injected into the model's
+    // context, so Vesta cannot convene anything: it decides and it instructs, and the
+    // session executes. What makes that workable is that the instruction is a command the
+    // session can run rather than prose it has to translate into one.
+    //
+    // **Deciding the panel and opening the round are two moments and they are not
+    // collapsed here.** At routing time the piece does not exist yet, so there is no
+    // artifact to key a round on and the command below carries a placeholder. A router
+    // that invented a filename in order to look complete would be writing a round against
+    // a file nobody is going to write.
+    if !panel.is_empty() {
+        let boot_cost: usize = panel
+            .iter()
+            .filter_map(|r| {
+                memory
+                    .agents
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&r.agent))
+                    .and_then(|a| crate::blocks::read(&a.root))
+            })
+            .map(|bs| {
+                bs.iter()
+                    .filter(|b| b.mode == crate::blocks::Mode::Resident)
+                    .map(|b| b.tokens())
+                    .sum::<usize>()
+            })
+            .sum();
+
+        text.push_str(&panel_instruction(&agent, &panel, boot_cost));
+    }
+
+    // **What the verdict buys, spent here rather than reported here.**
+    //
+    // This block emitted paths for every verdict, and a path is an invitation to `cat`.
+    // Measured on 2026-09-10 in a live session: the agent read no passage through the
+    // MCP for three turns and answered entirely out of `grep`, with the server running
+    // the whole time. It was not disobedience. A path costs a tool call to follow, and
+    // the constitutions send a session to `MAP.md` first, which is 24,045 bytes in the
+    // smallest base here and 37,285 in the largest. Against that on-ramp, one more
+    // round trip to the library never wins.
+    //
+    // So the fix is not to ask the model to call the library. It is to stop making it
+    // ask. On `hit` the passages arrive already read, and the turn starts with the
+    // answer in context and zero tool calls.
+    //
+    // **The floor is what makes this affordable**, which is why it is gated on the
+    // verdict and not on a flag. ADR-0036 scales the floor with the corpus and ADR-0032
+    // puts the answerer after the verdict; both already exist, and a `hit` is exactly
+    // the claim that the top file is above the noise and separated from the runner-up.
+    // A `guess` gets paths, unchanged, because paying passage tokens for a coincidence
+    // of vocabulary is how this becomes the most expensive thing in the loop.
+    let vouched = if answer.confidence.verdict == Verdict::Hit {
+        hit_briefing(memory, &answer, top)
+    } else {
+        None
+    };
+
+    if files.is_empty() {
+        text.push_str("No file ranked for this message.\n");
+    } else if let Some(briefing) = vouched {
+        text.push_str(&briefing);
+    } else {
+        text.push_str("Open these before answering:\n");
+        text.push_str(&files.join("\n"));
+        text.push('\n');
+    }
+
+    Briefing { agent: Some(agent), panel, switched, text }
+}
+
+/// How much of the library one `hit` may put in front of a session, in characters.
+///
+/// **A character budget and not a passage count**, because passage length is bounded by
+/// nothing. The notes in this fleet run from a single table row to a hundred sections,
+/// so `take(n)` bounds how many pieces arrive and says nothing at all about how large
+/// they are. The only thing that bounds an injection is a budget measured in the unit
+/// the injection is billed in.
+///
+/// **6000 was chosen against what it replaces, not against what sounds small.** The
+/// thing it grows from is the path list, roughly 600 bytes on this fleet. The thing it
+/// makes unnecessary is the `MAP.md` read at the top of every constitution, measured on
+/// 2026-09-10 at 24,045 bytes for the smallest base and 37,285 for the largest. This
+/// sits an order of magnitude under the cheapest read it removes and an order of
+/// magnitude over the list it extends, which is the range where it is worth doing at
+/// all.
+///
+/// Raise it and every `hit` message pays more, including the ones where the first
+/// passage was already enough. Lower it and long notes arrive cut, which is worse than
+/// a path: a path admits it is not the answer, and half an argument does not.
+const HIT_BUDGET: usize = 6000;
+
+/// The passages a `hit` puts in front of the session, from the one file the verdict is
+/// actually about. `None` when there is no such file, and the caller falls back to the
+/// path list.
+///
+/// **Only `keyword_top` gets text, and finding that out cost a wrong first version.**
+/// The first draft here emitted passages from the fused top five, which is the list
+/// `files` is built from, and running it on 2026-09-10 against this fleet produced six
+/// kilobytes about a transcription tool's `--model` flag under the question "why is
+/// there no embedding model in the retrieval path". The verdict had said `hit`, and the
+/// verdict was not wrong.
+///
+/// The verdict is a claim about the **keyword** ranking's top file, which [`Answer`]
+/// says in as many words and carries separately as `keyword_top` because it is
+/// frequently not the fused first choice. Measured on three questions the same day, it
+/// differed on two, and on both it was the better file:
+/// `zed/knowledge/systems/fine-tuning-versus-retrieval.md` against
+/// `cicero/knowledge/ulpia/ulpia-differentiators.md`, and `zed/fleet/roster.md` against
+/// `aldus/knowledge/design-system.md`.
+///
+/// Emitting the fused list under that verdict was borrowing a judgement about one file
+/// to vouch for four others. **A path is an offer and text is an assertion**, so the
+/// widening that was harmless while this printed paths stopped being harmless the moment
+/// it printed passages. Everything the verdict did not vouch for goes back to being an
+/// offer.
+///
+/// The rendering follows [`crate::answer::prompt`] deliberately, header for header:
+/// path, heading, short-memory label, captured-from. Two surfaces showing the same
+/// passages in two shapes is how a reader comes to trust one and not the other, and the
+/// labels are load bearing. `SHORT MEMORY` says nobody has judged this yet, and
+/// `captured from` is the answer to every question about where a claim came from.
+///
+/// **What the budget drops is named, never dropped quietly**, and it drops a tail rather
+/// than a selection: once a passage does not fit, no later one is tried. Continuing
+/// would admit short passages from further down while the long one above them is
+/// missing, which silently reorders the file by length.
+fn hit_briefing(memory: &Memory, answer: &crate::memory::Answer, top: usize) -> Option<String> {
+    let vouched = answer.keyword_top.as_deref()?;
+    let (base, path) = vouched.split_once('/')?;
+    let ranked = answer
+        .found
+        .iter()
+        .take(top)
+        .find(|f| format!("{}/{}", f.base, f.path) == vouched);
+
+    // **The vouched file does not have to have survived fusion**, and insisting that it
+    // did was the last thing keeping this from firing. Measured over the abstention
+    // set's 18 `hit` verdicts on 2026-09-10: two of them ranked a file first on keywords
+    // that fusion then left out of the top five, and the briefing gave up on both.
+    //
+    // Giving up was never necessary. `keyword_top` is a `base/path`, which is everything
+    // needed to read the file, and the case is the keyword-only case again by
+    // construction: had the text scorer ranked this file, both scorers would agree on it
+    // and fusion would have put it near the front rather than off the end. So there were
+    // never matched passages to lose here, and the same disk read answers it.
+    //
+    // Backlog Z55 proposed fixing this by widening the fusion instead. That would have
+    // meant changing what `classify::dossier` sees, which is a change to routing, to
+    // recover a file this already holds the address of.
+    let owned;
+    let file = match ranked {
+        Some(f) => f,
+        None => {
+            owned = crate::retrieve::Retrieved {
+                base: base.to_string(),
+                path: path.to_string(),
+                layer: crate::retrieve::layer_of(path),
+                title: String::new(),
+                purpose: String::new(),
+                score: 0.0,
+                keyword_score: answer.confidence.keyword_score,
+                why: vec!["keywords #1".into()],
+                matched: Vec::new(),
+                passages: Vec::new(),
+            };
+            &owned
+        }
+    };
+
+    // **The vouched file usually has no passages, which is not a coincidence and was the
+    // difference between a feature that fires half the time and one that fires.**
+    //
+    // `Retrieved.passages` is empty when only the keyword scorer ranked the file, and
+    // the file this briefing is about is the keyword scorer's own first choice, so it is
+    // the file most likely in the whole result set to have been ranked that way. Measured
+    // end to end on 2026-09-10 over the 18 `hit` verdicts in the abstention set: the
+    // briefing fired 9 times, and 7 of the 9 misses were exactly this.
+    //
+    // The text is not missing, only unretrieved: the text scorer did not rank this file
+    // for these terms, so no chunk came back with it. Chunking it off disk costs one
+    // small file read in a hook that already reads several, and `store::chunk` is the
+    // same splitter the index was built with, so the headings match what every other
+    // surface shows.
+    //
+    // **It is labelled differently on purpose.** Retrieved passages are the sections that
+    // matched the question. These are the front of the file, which is merely where this
+    // fleet's notes put their own summary. Presenting the second as the first would be
+    // claiming a relevance nothing measured.
+    let head;
+    let (passages, matched) = if file.passages.is_empty() {
+        head = head_of(memory, &file.base, &file.path)?;
+        (&head[..], false)
+    } else {
+        (&file.passages[..], true)
+    };
+    if passages.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from(if matched {
+        "The library answered this one. Below are the passages that matched, from the \
+         single file the verdict is about, already read for you. Open it only when you \
+         need more than what is here. The files listed after them are ranked leads and \
+         nothing vouches for them.\n"
+    } else {
+        "The library answered this one. The file the verdict is about ranked on its keys \
+         alone, so nothing matched inside it and what follows is the front of that file, \
+         not the part that answers. Read it as a strong lead. The files listed after it \
+         are weaker leads and nothing vouches for them.\n"
+    });
+    let mut spent = 0usize;
+    let mut cut = 0usize;
+
+    for (i, p) in passages.iter().enumerate() {
+        let body = p.text.trim();
+        if spent + body.len() > HIT_BUDGET {
+            cut = passages.len() - i;
+            break;
+        }
+        let layer = match file.layer {
+            crate::retrieve::Layer::Short => " [SHORT MEMORY: recent, not distilled]",
+            crate::retrieve::Layer::Long => "",
+        };
+        let origin = match &p.captured_from {
+            Some(src) if !src.is_empty() => format!(" [captured from {src}]"),
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "\n--- {}/{} ({}){}{}\n{}\n",
+            file.base,
+            file.path,
+            if p.heading_path.is_empty() { "top" } else { &p.heading_path },
+            layer,
+            origin,
+            body
+        ));
+        spent += body.len();
+    }
+
+    if spent == 0 {
+        return None;
+    }
+    if cut > 0 {
+        out.push_str(&format!(
+            "\n({cut} more passage(s) in that file did not fit the boot budget. Open it \
+             if what is above stops short.)\n"
+        ));
+    }
+
+    let leads: Vec<String> = answer
+        .found
+        .iter()
+        .take(top)
+        .filter(|f| format!("{}/{}", f.base, f.path) != vouched)
+        .map(|f| format!("  {}/{}", f.base, f.path))
+        .collect();
+    if !leads.is_empty() {
+        out.push_str(&format!("\nRanked leads, unvouched:\n{}\n", leads.join("\n")));
+    }
+    Some(out)
+}
+
+/// The front of a file, chunked the way the index chunks it, for the case where the
+/// verdict vouches for a file the text scorer never ranked.
+///
+/// `store::chunk` rather than a byte slice of the head, because the heading path is what
+/// makes a passage citable and a raw slice would cut mid-section and mid-character. It is
+/// the same function the index is built with, so what a reader sees here and what they
+/// would see from [`crate::answer::prompt`] are the same shapes with the same headings.
+///
+/// `None` on any read failure, and the caller falls back to the path list. A file the
+/// index knows and the disk does not is a real state, since the index is a cache, and it
+/// is not this function's job to report it.
+fn head_of(memory: &Memory, base: &str, path: &str) -> Option<Vec<crate::retrieve::Passage>> {
+    let root = &memory.agents.iter().find(|a| a.name.eq_ignore_ascii_case(base))?.root;
+    let text = std::fs::read_to_string(root.join(path)).ok()?;
+    Some(
+        crate::store::chunk(&text)
+            .into_iter()
+            .map(|c| crate::retrieve::Passage {
+                heading_path: c.heading_path,
+                text: c.text,
+                excerpt: String::new(),
+                provenance: None,
+                stage: None,
+                captured_from: None,
+            })
+            .collect(),
+    )
+}
+
+/// What the owner is told when the router judged the work to need more than one agent.
+///
+/// Split out because it is the part with rules in it, and the rules are the reason the
+/// panel decision is worth making at all: draft before asking, the command that opens the
+/// round, the price, and the two things the owner may not do with what comes back. Testing
+/// it through [`brief`] would need a live classifier subprocess, which is how a paragraph
+/// like this goes untested until it goes wrong.
+fn panel_instruction(
+    owner: &str,
+    panel: &[crate::classify::Reviewer],
+    boot_cost: usize,
+) -> String {
+    let mut out = String::from(
+        "VESTA: this one is not yours alone. You own the answer and you are accountable \
+         for it; these agents have to object to it before it ships, each from inside its \
+         own domain:\n\n",
+    );
+    for r in panel {
+        match r.why.is_empty() {
+            true => out.push_str(&format!("  {}\n", r.agent)),
+            false => out.push_str(&format!("  {}: {}\n", r.agent, r.why)),
+        }
+    }
+    out.push_str(&format!(
+        "\nDraft first and never poll them for direction: a panel asked what the work \
+         should be returns a topic list. Then open the round, which boots each one as \
+         itself and keeps the ledger:\n\n  kb panel <the file you wrote> --owner \
+         {owner} {}\n\nThat costs about {boot_cost} tokens of constitutions, plus \
+         the piece read once by each of them, and measured against real subagents a panel \
+         has run about six times higher than that. An objection you refuse is refused in \
+         writing; one marked blocking is not yours to refuse.\n\n",
+        panel
+            .iter()
+            .map(|r| format!("--reviewer {}", r.agent))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    out
+}
+
+/// The names that could actually answer, which is not every base that was opened.
+///
+/// **It listed every base, including the ones that can never be chosen.** This is printed
+/// when routing found no owner, precisely so the reader can pick one, and it was offering
+/// `person` and `general`: two bases with no `agent.txt`, read by everyone and answering for
+/// nobody. `Memory::roster`, the list the classifier may choose from, has always filtered;
+/// only the sentence a person reads did not.
+///
+/// A menu that lists dishes the kitchen does not make is worse than a short menu.
+///
+/// **And a menu of bare names is not a menu either.** This printed thirteen names and
+/// nothing else, which defeats the sentence three paragraphs up: nobody can pick from a
+/// list of words like `goldoni` and `apelles` unless they already know the fleet by heart.
+/// A model reading this off a hook certainly cannot, and that is the reader it is actually
+/// written for.
+///
+/// It cost a real answer on 2026-09-04. Routing abstained on a request to review the
+/// landing page copy, the session read this roster, could not tell that `goldoni` is the
+/// fleet's scriptwriter, and reported to Richard that the fleet had no copywriter at all.
+/// It has one. The roster simply would not say so.
+///
+/// So each line now carries the role from `agent.txt`, and the edge when the agent declared
+/// one. Both were already parsed by `fleet::card` and were never asked for here. The edge
+/// matters as much as the role, for the reason `Card::ends` gives: a roster of roles tells
+/// a reader what each agent does and never what none of them does, and that second thing is
+/// the judgement this whole message exists to hand over.
+fn roster(memory: &Memory) -> String {
+    let mut out = String::from("The fleet:\n");
+    for a in memory.agents.iter().filter(|a| a.routable) {
+        let card = fleet::card(&a.root, "agent.txt", &a.name);
+        match card.role {
+            Some(role) => out.push_str(&format!("  {}: {}\n", a.name, first_clause(&role, 96))),
+            None => out.push_str(&format!("  {}\n", a.name)),
+        }
+        // The edge gets more room than the role, and deliberately. `Card::ends` exists
+        // because a roster of roles says what each agent does and never what none of them
+        // does, and an edge cut before its second half does exactly the damage it was
+        // written to prevent: "ends where the question stops being about what the brand
+        // means and starts being about how it" tells a reader nothing at all.
+        if let Some(ends) = card.ends {
+            out.push_str(&format!("      stops at: {}\n", first_clause(&ends, 150)));
+        }
+    }
+    out
+}
+
+/// The opening clause of a mandate, capped, so one wordy agent cannot push the others off
+/// the screen.
+///
+/// Cuts at a sentence end when one falls inside the cap and at a word boundary otherwise,
+/// because a role sliced mid-word reads as corruption rather than as a summary. The full
+/// mandate lives in the agent's own base, which is where whoever gets chosen will read it.
+fn first_clause(text: &str, cap: usize) -> String {
+    let text = text.trim();
+    if let Some(end) = text.find(". ") {
+        if end < cap {
+            return text[..end].to_string();
+        }
+    }
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    // Slicing bytes would panic on a multi-byte boundary, and these mandates are written
+    // in two languages. Walk to the last whitespace at or before the cap instead.
+    let end = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= cap)
+        .last()
+        .unwrap_or(0);
+    match text[..end].rfind(char::is_whitespace) {
+        Some(cut) => format!("{}...", text[..cut].trim_end()),
+        None => text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The paragraph a session acts on when the router says the work needs more than one
+    /// agent. It has to carry a command rather than advice, because the hook's only output
+    /// channel is text and the session is what executes.
+    #[test]
+    fn a_panel_briefing_names_who_must_object_and_hands_over_the_command_to_do_it() {
+        let panel = vec![
+            crate::classify::Reviewer {
+                agent: "zed".into(),
+                why: "whether the latency figure is true".into(),
+            },
+            crate::classify::Reviewer { agent: "apelles".into(), why: String::new() },
+        ];
+        let text = panel_instruction("steve", &panel, 23079);
+
+        assert!(text.contains("zed: whether the latency figure is true"), "{text}");
+        assert!(text.contains("  apelles
+"), "a reviewer with no reason still gets a line");
+        assert!(
+            text.contains("kb panel <the file you wrote> --owner steve --reviewer zed --reviewer apelles"),
+            "the command has to be runnable, not described: {text}"
+        );
+        assert!(text.contains("23079"), "the price is stated before it is spent");
+        assert!(text.contains("Draft first"), "a panel asked for direction returns a topic list");
+        assert!(
+            text.contains("blocking is not yours to refuse"),
+            "the one thing the owner may not do has to be in the briefing: {text}"
+        );
+    }
+
+    static EMPTY_MEMORY_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A base with nothing in it, for the tests whose vouched file already carries
+    /// passages and so never reaches the disk.
+    fn empty_memory() -> Memory {
+        let count = EMPTY_MEMORY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("kb-brief-{}-{}", std::process::id(), count));
+        let agent = root.join("fleet").join("zed");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("dirs");
+        std::fs::write(agent.join("agent.txt"), "name = Zed
+role = The architect
+").expect("agent");
+        std::fs::write(agent.join("knowledge").join("a.md"), "# A
+
+**Search for:** `floor`
+
+body
+")
+            .expect("note");
+        Memory::open(&[root.as_path()], true).expect("memory")
+    }
+
+    fn retrieved(base: &str, path: &str, passages: Vec<(&str, &str)>) -> crate::retrieve::Retrieved {
+        crate::retrieve::Retrieved {
+            base: base.into(),
+            path: path.into(),
+            layer: crate::retrieve::Layer::Long,
+            title: "T".into(),
+            purpose: "exists to test".into(),
+            score: 1.0,
+            keyword_score: 40.0,
+            why: vec!["keywords #1".into()],
+            matched: vec!["floor".into()],
+            passages: passages
+                .into_iter()
+                .map(|(heading, text)| crate::retrieve::Passage {
+                    heading_path: heading.into(),
+                    text: text.into(),
+                    excerpt: String::new(),
+                    provenance: None,
+                    stage: None,
+                    captured_from: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The fused list is deliberately not in the same order as `keyword_top`, because
+    /// that gap is the defect these tests exist to hold shut.
+    fn hit_answer(found: Vec<crate::retrieve::Retrieved>, keyword_top: Option<&str>) -> crate::memory::Answer {
+        crate::memory::Answer {
+            found,
+            confidence: crate::memory::Confidence {
+                verdict: Verdict::Hit,
+                agreement: 2,
+                keyword_score: 40.0,
+                margin: 2.0,
+                floor: 18.9,
+            },
+            agent: None,
+            keyword_top: keyword_top.map(str::to_string),
+        }
+    }
+
+    /// The whole point of the change: on a hit the session is handed the text, not a
+    /// path it has to spend a tool call following.
+    #[test]
+    fn a_hit_hands_over_the_passages_of_the_file_the_verdict_is_about() {
+        let answer = hit_answer(
+            vec![
+                retrieved("cicero", "knowledge/noise.md", vec![("Noise", "a --model flag")]),
+                retrieved("zed", "knowledge/a.md", vec![("The floor", "The floor scales with the corpus.")]),
+            ],
+            Some("zed/knowledge/a.md"),
+        );
+        let text = hit_briefing(&empty_memory(), &answer, 5).expect("a vouched file with passages briefs");
+
+        assert!(
+            text.contains("The floor scales with the corpus."),
+            "the vouched passage body is the deliverable: {text}"
+        );
+        assert!(text.contains("zed/knowledge/a.md (The floor)"), "the citation has to survive: {text}");
+        assert!(
+            !text.contains("a --model flag"),
+            "the fused top file is not vouched for and must not arrive as text: {text}"
+        );
+        assert!(
+            text.contains("Ranked leads, unvouched:") && text.contains("cicero/knowledge/noise.md"),
+            "the rest stay offers, and stay visible: {text}"
+        );
+    }
+
+    /// The regression that running it caught on 2026-09-10: six kilobytes about a
+    /// transcription tool's `--model` flag, injected under a correct `hit`, because the
+    /// verdict judges the keyword ranking and the passages came from the fused one.
+    #[test]
+    fn the_fused_top_file_is_never_briefed_on_the_strength_of_another_file_s_verdict() {
+        // The vouched file here exists on disk in the fixture, so the briefing does fire.
+        // What it must never do is fire with the *other* file's text, which is the six
+        // kilobytes about a `--model` flag that this whole guard exists for.
+        let answer = hit_answer(
+            vec![retrieved("poggio", "tools/transcribe.md", vec![("The tool", "`--model` defaults to medium")])],
+            Some("zed/knowledge/a.md"),
+        );
+        let text = hit_briefing(&empty_memory(), &answer, 5).expect("the vouched file is on disk");
+
+        assert!(
+            !text.contains("`--model` defaults to medium"),
+            "the fused file is not vouched for and its text must not arrive: {text}"
+        );
+        assert!(text.contains("body"), "the vouched file's own text is what arrives: {text}");
+    }
+
+    /// Z55, and the reason it did not need the fusion widened: `keyword_top` is a
+    /// `base/path`, so a file fusion left out is still a file this can read.
+    #[test]
+    fn a_vouched_file_that_fused_out_is_still_briefed_from_its_path() {
+        let answer = hit_answer(
+            vec![retrieved("poggio", "tools/transcribe.md", vec![("The tool", "noise")])],
+            Some("zed/knowledge/a.md"),
+        );
+        let text = hit_briefing(&empty_memory(), &answer, 5).expect("it is read off disk by path");
+
+        assert!(text.contains("zed/knowledge/a.md"), "the vouched file is cited: {text}");
+        assert!(
+            text.contains("Ranked leads, unvouched:") && text.contains("poggio/tools/transcribe.md"),
+            "the fused result set stays visible as leads: {text}"
+        );
+    }
+
+    /// The budget is the only thing standing between this and a boot that costs more
+    /// than the read it replaced, and a cap nobody can see is a cap that lies.
+    #[test]
+    fn the_budget_drops_a_tail_says_how_much_and_never_cherry_picks() {
+        let long = "x".repeat(HIT_BUDGET - 10);
+        let answer = hit_answer(
+            vec![retrieved(
+                "zed",
+                "knowledge/a.md",
+                vec![("First", &long), ("Second", &"y".repeat(100)), ("Third", "short enough")],
+            )],
+            Some("zed/knowledge/a.md"),
+        );
+        let text = hit_briefing(&empty_memory(), &answer, 5).expect("the first passage fits");
+
+        assert!(text.contains(&long), "the first passage fits and must be emitted: {text}");
+        assert!(
+            !text.contains("short enough"),
+            "a later short passage must not jump the one that did not fit: {text}"
+        );
+        assert!(text.contains("2 more passage(s)"), "the size of the tail is stated: {text}");
+    }
+
+    /// A file that ranked on its keys alone carries no chunk, and it is the file the
+    /// verdict is about, so the text is fetched off disk rather than surrendered. It has
+    /// to arrive labelled as the front of the file and not as the part that matched.
+    #[test]
+    fn a_vouched_file_with_no_passages_is_read_off_disk_and_says_so() {
+        let answer = hit_answer(vec![retrieved("zed", "knowledge/a.md", vec![])], Some("zed/knowledge/a.md"));
+        let text = hit_briefing(&empty_memory(), &answer, 5).expect("the file is on disk");
+
+        assert!(text.contains("body"), "the file's own text is the briefing: {text}");
+        assert!(
+            text.contains("ranked on its keys alone") && text.contains("not the part that answers"),
+            "the reader has to be told this is the front and not the match: {text}"
+        );
+    }
+
+    /// The two states where nothing is vouched for, and both have to fall back rather
+    /// than print a header over nothing.
+    #[test]
+    fn nothing_vouched_and_nothing_on_disk_both_brief_nothing() {
+        let no_top = hit_answer(vec![retrieved("zed", "knowledge/a.md", vec![("H", "body")])], None);
+        assert!(
+            hit_briefing(&empty_memory(), &no_top, 5).is_none(),
+            "no keyword_top means nothing is vouched for"
+        );
+
+        let missing = hit_answer(
+            vec![retrieved("zed", "knowledge/not-on-disk.md", vec![])],
+            Some("zed/knowledge/not-on-disk.md"),
+        );
+        assert!(
+            hit_briefing(&empty_memory(), &missing, 5).is_none(),
+            "the index is a cache and the disk is the truth; a stale entry falls back"
+        );
+    }
+
+    /// `top` is the caller's cap on files and it governs here too, on both halves: the
+    /// vouched file has to be inside it, and so do the leads.
+    #[test]
+    fn the_briefing_respects_the_caller_s_file_cap() {
+        let mut found = vec![retrieved("zed", "knowledge/a.md", vec![("H", "body")])];
+        for n in 0..6 {
+            found.push(retrieved("zed", &format!("knowledge/lead-{n}.md"), vec![]));
+        }
+        let text = hit_briefing(&empty_memory(), &hit_answer(found, Some("zed/knowledge/a.md")), 3)
+            .expect("the vouched file is first and inside the cap");
+
+        assert!(text.contains("lead-1.md"), "the second lead is inside the cap: {text}");
+        assert!(!text.contains("lead-5.md"), "a file past --top must not reach the session: {text}");
+    }
+
+    #[test]
+    fn the_roster_says_what_each_agent_does_and_where_it_stops() {
+        // The regression this guards: the roster printed bare names, a session read it,
+        // could not tell that `goldoni` is the scriptwriter, and told Richard the fleet had
+        // no copywriter. A menu has to name the dishes.
+        let root = std::env::temp_dir().join(format!("kb-roster-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("fleet").join("goldoni");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("dirs");
+        std::fs::write(
+            agent.join("agent.txt"),
+            "name = Goldoni\nrole = The scriptwriter: turns an argument into a script\nends = Ends at the moment of performance\n",
+        )
+        .expect("agent");
+        std::fs::write(
+            agent.join("knowledge").join("a.md"),
+            "# A\n\n**Search for:** `roteiro`\n\nbody\n",
+        )
+        .expect("note");
+
+        let memory = Memory::open(&[root.as_path()], true).expect("memory");
+        let text = roster(&memory);
+        assert!(text.contains("goldoni: The scriptwriter"), "role is missing: {text}");
+        assert!(text.contains("stops at: Ends at the moment"), "edge is missing: {text}");
+    }
+
+    #[test]
+    fn a_long_mandate_is_cut_on_a_word_and_never_mid_character() {
+        // Both halves matter. Cutting mid-word reads as corruption, and these mandates are
+        // written in two languages, so a byte slice would panic on an accented character
+        // rather than merely look wrong.
+        let long = "Operacoes: cuida do que ja esta no ar, a conta da Cloudflare e a zona, \
+                    a release, a verificacao por fora e o rollback, e o registro do que roda";
+        let cut = first_clause(long, 96);
+        assert!(cut.ends_with("..."), "should be truncated: {cut}");
+        assert!(cut.chars().count() <= 100, "cap overrun: {cut}");
+        assert!(!cut.trim_end_matches('.').ends_with(char::is_alphabetic) || cut.contains(' '));
+
+        // A sentence that ends inside the cap keeps its full first sentence and no ellipsis.
+        assert_eq!(first_clause("Operations: runs what is live. And more.", 96), "Operations: runs what is live");
+
+        // Short input is returned whole.
+        assert_eq!(first_clause("Brand", 96), "Brand");
+    }
+
+    #[test]
+    fn the_prompt_and_session_come_off_the_hook_payload() {
+        let req = parse_request(
+            r#"{"session_id":"abc-123","prompt":"quanto de proteina","cwd":"C:/x","hook_event_name":"UserPromptSubmit"}"#,
+        )
+        .expect("parses");
+        assert_eq!(req.prompt, "quanto de proteina");
+        assert_eq!(req.session.as_deref(), Some("abc-123"));
+        assert_eq!(req.cwd, Some(PathBuf::from("C:/x")));
+    }
+
+    /// The runtime's payload belongs to somebody else and can change under us. Missing
+    /// fields must degrade, never panic, because a panicking hook takes the user's
+    /// message with it. The one field kept here is what says this is an envelope at all.
+    #[test]
+    fn a_payload_missing_everything_still_parses() {
+        let req = parse_request(r#"{"hook_event_name":"UserPromptSubmit"}"#).expect("parses");
+        assert_eq!(req.prompt, "");
+        assert_eq!(req.session, None);
+        assert!(req.cwd.is_none());
+    }
+
+    /// **The second shape, and the reason this command is not one vendor's feature.**
+    /// A host with no prompt hook has a message and nothing else, so a message is a
+    /// complete input: no session, no working directory, and the caller supplies those
+    /// with flags when it has them.
+    #[test]
+    fn a_bare_message_on_stdin_is_the_message() {
+        let req = parse_request("quanto de proteina por refeicao").expect("parses");
+        assert_eq!(req.prompt, "quanto de proteina por refeicao");
+        assert_eq!(req.session, None);
+        assert!(req.cwd.is_none());
+    }
+
+    /// Nothing typed is nothing to route. An empty envelope is a session opening and gets
+    /// the roster; empty stdin with no envelope around it is not an event at all.
+    #[test]
+    fn empty_stdin_is_not_a_message() {
+        assert!(parse_request("   \n  ").is_none());
+        assert!(parse_text("").is_none());
+    }
+
+    /// **The sniff, in both directions.** Text that opens with a brace and does not parse
+    /// is still text, and so is a JSON object carrying none of the envelope's fields. What
+    /// is left over is the failure mode named on `parse_request`, and `--text` is the way
+    /// out of it.
+    #[test]
+    fn text_that_merely_looks_like_a_payload_is_still_text() {
+        let broken = parse_request("{ this is not json, it is a question about braces }")
+            .expect("falls through to text");
+        assert_eq!(broken.prompt, "{ this is not json, it is a question about braces }");
+
+        let foreign = parse_request(r#"{"kind":"note","body":"hi"}"#).expect("falls through");
+        assert_eq!(foreign.prompt, r#"{"kind":"note","body":"hi"}"#);
+
+        // And the residue, stated as a test so nobody discovers it as a surprise: a real
+        // payload pasted as a whole message is read as a payload. `parse_text` is what a
+        // caller passing `--text` gets, and it never looks inside.
+        let pasted = r#"{"prompt":"inner","session_id":"s"}"#;
+        assert_eq!(parse_request(pasted).expect("sniffed").prompt, "inner");
+        assert_eq!(parse_text(pasted).expect("verbatim").prompt, pasted);
+    }
+
+    /// A session id that arrives empty is the same state as no session id, because an
+    /// empty file name is not a cache key.
+    #[test]
+    fn an_empty_session_id_is_no_session() {
+        let req = parse_request(r#"{"prompt":"x","session_id":"  "}"#).expect("parses");
+        assert_eq!(req.session, None);
+    }
+
+    /// The defect this guard exists for: the runtime submits background task
+    /// notifications on the same hook and in the same field as a question, so the router
+    /// was ranking files against machine text and paying a classifier subprocess to
+    /// decide who owns it.
+    #[test]
+    fn a_notification_leaves_nothing_to_ask() {
+        let notification = "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\n\
+             <task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n\
+             </task-notification>\n</system-reminder>";
+        assert!(without_machine_blocks(notification).trim().is_empty());
+    }
+
+    /// Why this strips rather than matching a marker. A person quoting a notification in
+    /// order to ask about it is asking a question, and a substring test would have
+    /// silenced the very message that reported this defect.
+    #[test]
+    fn a_question_that_quotes_a_notification_survives() {
+        let asked = without_machine_blocks(
+            "<system-reminder>[SYSTEM NOTIFICATION - NOT USER INPUT]</system-reminder>\n\
+             porque o roteador recebe isso?",
+        );
+        assert!(!asked.trim().is_empty());
+        assert!(asked.contains("porque o roteador recebe isso?"));
+        assert!(!asked.contains("SYSTEM NOTIFICATION"));
+    }
+
+    /// An envelope appended to a real question must not lend its vocabulary to the
+    /// ranking. The question is what gets scored, and nothing else.
+    #[test]
+    fn an_envelope_never_reaches_the_ranking() {
+        let asked = without_machine_blocks(
+            "quanto de proteina<system-reminder>cwd, git status, background task\
+             </system-reminder>",
+        );
+        assert_eq!(asked.trim(), "quanto de proteina");
+    }
+
+    /// A truncated envelope is still an envelope. Keeping the half that arrived would
+    /// score machine text as though a person had typed it.
+    #[test]
+    fn an_unterminated_envelope_is_dropped_to_the_end() {
+        assert_eq!(without_machine_blocks("<system-reminder>cortado ao meio").trim(), "");
+    }
+
+    /// The two events are different and have different right answers: a session opening
+    /// gets the roster so the model knows who exists, a notification gets silence so
+    /// whoever was already working stays working.
+    #[test]
+    fn a_notification_is_not_the_same_event_as_an_empty_prompt() {
+        assert!(without_machine_blocks("").trim().is_empty());
+        assert!(without_machine_blocks("<task-notification>x</task-notification>")
+            .trim()
+            .is_empty());
+    }
+
+    /// The session id arrives from outside the program and is used to build a path.
+    #[test]
+    fn a_session_id_cannot_escape_the_sessions_directory() {
+        let root = Path::new("C:/fleet");
+        let evil = session_file(root, "../../../../etc/passwd");
+        assert!(evil.starts_with("C:/fleet/.kb/sessions"), "stays inside: {}", evil.display());
+        assert!(!evil.to_string_lossy().contains(".."));
+    }
+
+    /// **The surface every message passes through counted no recall loss.** ADR-0035.
+    /// A refused question through `brief` now lands in the miss log like every other
+    /// surface, and in the session's own record, which is what becomes the deposit.
+    #[test]
+    fn a_refused_message_is_counted_and_goes_into_the_sessions_record() {
+        let root = std::env::temp_dir().join(format!("kb-boot-loss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("fleet").join("probe");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("scratch");
+        std::fs::write(agent.join("agent.txt"), "name = Probe\nrole = testing\n").expect("agent");
+        std::fs::write(
+            agent.join("knowledge").join("zebra.md"),
+            "# Zebra\n\n**Search for:** `zebra`, `quagga`\n\n**Exists to:** hold one animal\n",
+        )
+        .expect("note");
+        let memory = Memory::open(&[root.as_path()], true).expect("opens");
+
+        let req = Request {
+            prompt: "qual a taxa de juros do trimestre".into(),
+            session: Some("s-loss".into()),
+            cwd: None,
+        };
+        let _ = brief(&memory, &root, &req, 5);
+
+        let log = std::fs::read_to_string(crate::misses::path_in(&root)).expect("the loss was counted");
+        assert!(log.contains("qual a taxa de juros do trimestre"), "{log}");
+
+        let record = crate::capture::read(&root, "s-loss");
+        let refused = record.refused();
+        assert_eq!(refused.len(), 1, "and it is in the session's record: {record:?}");
+        assert_eq!(refused[0].0, "qual a taxa de juros do trimestre");
+    }
+
+    /// **The refusal that costs the most and explained the least.**
+    ///
+    /// `brief` runs on `UserPromptSubmit`, so this briefing goes into a model's context on
+    /// every message the fleet cannot place. It used to print a fixed `(top keyword score
+    /// 0.0, floor 6.9)`, which reads as *you nearly cleared it* on the one path where
+    /// nothing was measured against the floor at all. ADR-0035's case is exactly this
+    /// fixture: a fleet too small to clear the floor never routes, so it never captures,
+    /// so it stays too small. The briefing is where that loop is visible, so it is where
+    /// the size belongs.
+    #[test]
+    fn a_briefing_with_no_owner_names_the_size_of_the_fleet_it_refused_from() {
+        let root = std::env::temp_dir().join(format!("kb-boot-shortfall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("fleet").join("probe");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("scratch");
+        std::fs::write(agent.join("agent.txt"), "name = Probe\nrole = testing\n").expect("agent");
+        std::fs::write(
+            agent.join("knowledge").join("zebra.md"),
+            "# Zebra\n\n**Search for:** `zebra`, `quagga`\n\n**Exists to:** hold one animal\n",
+        )
+        .expect("note");
+        let memory = Memory::open(&[root.as_path()], true).expect("opens");
+
+        let req = Request {
+            prompt: "qual a taxa de juros do trimestre".into(),
+            session: Some("s-shortfall".into()),
+            cwd: None,
+        };
+        let brief = brief(&memory, &root, &req, 5);
+
+        assert!(brief.agent.is_none(), "the fixture is the found-no-owner branch");
+        assert!(brief.text.starts_with("VESTA:"), "{}", brief.text);
+        assert!(brief.text.contains("The fleet:"), "the roster is still last: {}", brief.text);
+        assert!(brief.text.contains('1'), "it names the fleet it refused from: {}", brief.text);
+        assert!(
+            !brief.text.contains("floor"),
+            "nothing scored, so nothing lost to the floor: {}",
+            brief.text
+        );
+    }
+
+    /// **The abstention log must count gaps, not traffic.**
+    ///
+    /// The record sits inside the coverage branch, so a message that was routed, and a
+    /// message refused for any reason other than a classifier judging coverage, must leave
+    /// it empty. This fixture is the found-no-owner branch with no classifier configured,
+    /// which is the population `crate::abstain` names as the miss log's and not this one's:
+    /// on a fleet without a classifier it fires on every message under the floor, and a row
+    /// per message would make the count measure the missing classifier.
+    ///
+    /// What this cannot reach is the branch that does record, because producing a verdict
+    /// needs a live classifier subprocess. Same limit `panel_instruction` documents, and the
+    /// same answer: the decision itself is a pure function with its own tests in
+    /// `crate::abstain`, and the call site was verified by running the real hook.
+    #[test]
+    fn a_refusal_that_is_not_a_coverage_judgement_writes_no_gap() {
+        let root = std::env::temp_dir().join(format!("kb-boot-abstain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("fleet").join("probe");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("scratch");
+        std::fs::write(agent.join("agent.txt"), "name = Probe\nrole = testing\n").expect("agent");
+        std::fs::write(
+            agent.join("knowledge").join("zebra.md"),
+            "# Zebra\n\n**Search for:** `zebra`, `quagga`\n\n**Exists to:** hold one animal\n",
+        )
+        .expect("note");
+        let memory = Memory::open(&[root.as_path()], true).expect("opens");
+
+        let req = Request {
+            prompt: "qual a taxa de juros do trimestre".into(),
+            session: Some("s-abstain".into()),
+            cwd: None,
+        };
+        let brief = brief(&memory, &root, &req, 5);
+
+        assert!(brief.agent.is_none(), "the fixture is the found-no-owner branch");
+        assert!(
+            crate::abstain::load(&crate::abstain::path_in(&root)).is_empty(),
+            "no classifier judged coverage here, so there is no coverage gap to record"
+        );
+        assert!(
+            !crate::abstain::path_in(&root).exists(),
+            "and the file is not created empty, which would read as a fleet that has abstained"
+        );
+    }
+
+    #[test]
+    fn the_same_agent_twice_in_a_row_is_not_a_switch() {
+        let dir = std::env::temp_dir().join(format!("kb-boot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        assert_eq!(last_agent(&dir, "s1"), None, "a fresh session remembers nothing");
+        remember_agent(&dir, "s1", "zed");
+        assert_eq!(last_agent(&dir, "s1").as_deref(), Some("zed"));
+        remember_agent(&dir, "s1", "yaron");
+        assert_eq!(last_agent(&dir, "s1").as_deref(), Some("yaron"), "a switch is recorded");
+    }
+
+    #[test]
+    fn a_boot_briefing_includes_handoff_continuity_when_present() {
+        let root = std::env::temp_dir().join(format!("kb-boot-handoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("fleet").join("zed");
+        std::fs::create_dir_all(agent.join("knowledge")).expect("scratch");
+        std::fs::write(agent.join("agent.txt"), "name = Zed\nrole = software\n").expect("agent");
+        std::fs::write(
+            agent.join("knowledge").join("architecture.md"),
+            "# Architecture\n\n**Search for:** `rust`, `systems`, `compiler`\n\n**Exists to:** architecture\n\nRust compiler architecture.\n",
+        )
+        .expect("note");
+        std::fs::write(
+            agent.join("knowledge").join("craft.md"),
+            "# Craft\n\n**Search for:** `testing`, `tdd`, `refactoring`\n\n**Exists to:** craft\n\nTesting craft.\n",
+        )
+        .expect("note");
+        let memory = Memory::open(&[root.as_path()], true).expect("opens");
+
+        let record = crate::handoff::HandoffRecord {
+            session: "s-handoff".into(),
+            agent: "zed".into(),
+            task: "Build feature X with TDD".into(),
+            status: crate::handoff::HandoffStatus::Pending,
+            claimed_by: None,
+            decisions: vec!["Store in .kb/sessions".into()],
+            blockers: vec!["None".into()],
+            next_steps: vec!["Implement green phase".into()],
+            references: vec![],
+            updated_at: "2026-09-14".into(),
+        };
+        crate::handoff::save(&root, &record).expect("save handoff");
+
+        let req = Request {
+            prompt: "como construir em rust".into(),
+            session: Some("s-handoff".into()),
+            cwd: None,
+        };
+        let brief = brief(&memory, &root, &req, 5);
+
+        assert!(
+            brief.text.contains("VESTA: CONTINUITY (session s-handoff, status: pending):"),
+            "expected continuity header in briefing text: {}",
+            brief.text
+        );
+        assert!(
+            brief.text.contains("Active task: Build feature X with TDD"),
+            "expected active task in briefing text: {}",
+            brief.text
+        );
+    }
+
+    #[test]
+    fn test_decompose_query_splits_on_compound_conjunctions_and_punctuation() {
+        let compound = "como compilar rust para webassembly e como precificar o aplicativo para lancamento";
+        let parts = decompose_query(compound);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("como compilar rust para webassembly"));
+        assert!(parts[1].contains("como precificar o aplicativo"));
+
+        let punctuated = "how to optimize sqlite index? and what is our marketing strategy?";
+        let parts2 = decompose_query(punctuated);
+        assert_eq!(parts2.len(), 2);
+        assert!(parts2[0].contains("how to optimize sqlite index"));
+        assert!(parts2[1].contains("what is our marketing strategy"));
+
+        let single = "como funciona o borrow checker";
+        let parts3 = decompose_query(single);
+        assert_eq!(parts3.len(), 1);
+        assert_eq!(parts3[0], "como funciona o borrow checker");
+    }
+
+    #[test]
+    fn test_brief_decomposes_multi_domain_query_and_convenes_panel() {
+        let root = std::env::temp_dir().join(format!("kb-test-boot-decomp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let zed = root.join("fleet").join("zed");
+        std::fs::create_dir_all(zed.join("knowledge")).expect("scratch");
+        std::fs::write(zed.join("agent.txt"), "name = Zed\nrole = systems architect\n").expect("agent");
+        std::fs::write(
+            zed.join("knowledge").join("compiler.md"),
+            "# Compiler\n\n**Search for:** `rust`, `compiler`, `webassembly`\n\n**Exists to:** compiler\n\nRust compiler and wasm.\n",
+        )
+        .expect("note");
+
+        let steve = root.join("fleet").join("steve");
+        std::fs::create_dir_all(steve.join("knowledge")).expect("scratch");
+        std::fs::write(steve.join("agent.txt"), "name = Steve\nrole = business and marketing\n").expect("agent");
+        std::fs::write(
+            steve.join("knowledge").join("pricing.md"),
+            "# Pricing\n\n**Search for:** `precificacao`, `pricing`, `marketing`\n\n**Exists to:** pricing\n\nPricing strategy.\n",
+        )
+        .expect("note");
+
+        let memory = Memory::open(&[root.as_path()], true).expect("opens");
+
+        let req = Request {
+            prompt: "como compilar rust para webassembly e como precificar produto com marketing".into(),
+            session: None,
+            cwd: None,
+        };
+
+        let brief = brief(&memory, &root, &req, 5);
+
+        assert_eq!(brief.agent, Some("zed".into()));
+        assert!(
+            brief.panel.iter().any(|r| r.agent.eq_ignore_ascii_case("steve")),
+            "expected steve on panel due to query decomposition: {:?}",
+            brief.panel
+        );
+        assert!(
+            brief.text.contains("decomposed compound inquiry") || brief.text.contains("cross-domain"),
+            "expected decomposition mention in briefing text: {}",
+            brief.text
+        );
+    }
+}
+

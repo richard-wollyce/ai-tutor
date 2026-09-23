@@ -1,0 +1,30 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Environment and sensitive keys
+*.env
+*.env.local
+*.dpapi
+
+# Runtime database and SQLite files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Ulpia derived index cache
+.kb/index.db
+**/base/.kb/index.db
+
+# Logs
+*.log

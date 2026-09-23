@@ -1,0 +1,2709 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wollyce | Personal AI Tutor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=Noto+Sans:ital,wght@0,200;0,400;1,200;1,400&display=swap" rel="stylesheet">
+  <style>
+    /* Ulpia Design System Tokens */
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --ground: #12100d;
+      --ink: #e7ddcc;
+      --ink-2: #ab9e89;
+      --accent: #c9a860;
+      --rule: #3d3320;
+      --chrome-ink: #c9a860;
+      --chrome-rule: #55452b;
+      --plate: #211b16;
+      --plate-ink: #ede3d2;
+      --plate-ink-2: #ac9c87;
+      --plate-border: #55452b;
+      --plate-accent: #c9a860;
+      --field: #1c1813;
+      --field-border: #4a3f31;
+      --gold: #c9a860;
+      --gold-sheen: #d8be82;
+      --gold-shadow: #a88c4e;
+      --field-1: #c9a860;
+      --field-2: #a88c4e;
+      --field-3: #6b5a2f;
+      --field-4: #3d3320;
+      --field-alpha: 0.30;
+      --field-accent-alpha: 0.30;
+      --field-vignette: rgba(0, 0, 0, 0.45);
+      --grain-opacity: 1;
+      --grain-blend: soft-light;
+      --card-hover: #29221c;
+      --badge-bg: #2d241d;
+    }
+
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --ground: #f6f1e7;
+      --ink: #241d16;
+      --ink-2: #5a5044;
+      --accent: #a63325;
+      --rule: #dacfc0;
+      --chrome-ink: #241d16;
+      --chrome-rule: #dacfc0;
+      --plate: #ede5d5;
+      --plate-ink: #241d16;
+      --plate-ink-2: #5a5044;
+      --plate-border: #d6c9b4;
+      --plate-accent: #a63325;
+      --field: #fffdf8;
+      --field-border: #c9bda9;
+      --gold: #c9a860;
+      --gold-sheen: #d8be82;
+      --gold-shadow: #a88c4e;
+      --field-1: #ead9a8;
+      --field-2: #e6dcc6;
+      --field-3: #a63325;
+      --field-4: #dacfc0;
+      --field-alpha: 0.42;
+      --field-accent-alpha: 0.14;
+      --field-vignette: rgba(36, 29, 22, 0.06);
+      --grain-opacity: 0.34;
+      --grain-blend: normal;
+      --card-hover: #e5dbc9;
+      --badge-bg: #e2d7c4;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* Global Grain Texture (Inlined SVG feTurbulence tiled at 220px) */
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      opacity: var(--grain-opacity);
+      mix-blend-mode: var(--grain-blend);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 220px 220px;
+    }
+
+    body {
+      background: var(--ground);
+      color: var(--ink);
+      font-family: "EB Garamond", Georgia, "Times New Roman", serif;
+      font-size: 1.05rem;
+      line-height: 1.55;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: background-color 150ms ease, color 150ms ease;
+    }
+
+    /* Noto Sans Stack for Badges, Telemetry, and Technical Elements */
+    .mono {
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+      letter-spacing: 0.02em;
+    }
+
+    .mono em,
+    .mono i {
+      font-style: italic;
+      font-weight: 200;
+    }
+
+    .mono strong,
+    .mono b {
+      font-weight: 400;
+    }
+
+    code, kbd, samp, pre {
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+    }
+
+    code strong, code b, kbd strong, kbd b, samp strong, samp b, pre strong, pre b {
+      font-weight: 400;
+    }
+
+    code em, code i, kbd em, kbd i, samp em, samp i, pre em, pre i {
+      font-style: italic;
+      font-weight: 200;
+    }
+
+    /* Header Band */
+    .band {
+      background: var(--ground);
+      border-bottom: 1px solid var(--chrome-rule);
+      min-height: 3.5rem;
+      display: flex;
+      align-items: center;
+      padding: 0 1.5rem;
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .band-inner {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: baseline;
+      gap: 0.75rem;
+    }
+
+    .wordmark {
+      font-size: 1.25rem;
+      line-height: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.3em;
+      color: var(--chrome-ink);
+      font-weight: 600;
+      text-decoration: none;
+      user-select: none;
+      margin-inline-end: -0.3em;
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      transition: color 150ms ease;
+    }
+
+    .wordmark:hover {
+      color: var(--accent);
+    }
+
+    .logo-mark {
+      display: inline-flex;
+      align-items: baseline;
+      white-space: nowrap;
+    }
+
+    .logo-grow {
+      display: inline-grid;
+      grid-template-columns: 0fr;
+      vertical-align: bottom;
+      transition: grid-template-columns 300ms cubic-bezier(0.33, 1, 0.68, 1);
+    }
+
+    .logo-grow-inner {
+      overflow: hidden;
+    }
+
+    .wordmark:hover .logo-grow,
+    .wordmark:focus-visible .logo-grow {
+      grid-template-columns: 1fr;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .logo-grow {
+        transition: none;
+      }
+    }
+
+    .app-tag {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--ink-2);
+      border-left: 1px solid var(--chrome-rule);
+      padding-left: 0.75rem;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .status-pill {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      padding: 0.35rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--plate-ink-2);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+
+    .status-pill:hover {
+      background: var(--card-hover);
+    }
+
+    .status-pill strong {
+      color: var(--plate-ink);
+      font-weight: 600;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #3fb950;
+      display: inline-block;
+    }
+
+    /* Lamp Toggle */
+    .lamp-toggle {
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--chrome-ink);
+      cursor: pointer;
+      padding: 0.4rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      transition: background 120ms ease;
+    }
+
+    .lamp-toggle:hover {
+      background: var(--plate);
+    }
+
+    /* Main App Layout (Sidebar + Center Stage) */
+    .app-layout {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Left Sidebar */
+    .sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--rule);
+      background: var(--ground);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: width 240ms cubic-bezier(0.4, 0, 0.2, 1), border-color 240ms ease;
+      white-space: nowrap;
+    }
+
+    .sidebar.collapsed {
+      width: 0 !important;
+      min-width: 0 !important;
+      border-right: none !important;
+      visibility: hidden;
+    }
+
+    .sidebar-header {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--rule);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn-new-chat {
+      flex: 1;
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      color: var(--plate-ink);
+      font-family: inherit;
+      font-size: 0.95rem;
+      padding: 0.55rem 0.85rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      letter-spacing: 0.05em;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .btn-new-chat:hover {
+      background: var(--card-hover);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .btn-sidebar-toggle {
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--chrome-ink);
+      cursor: pointer;
+      padding: 0.4rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      flex-shrink: 0;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .btn-sidebar-toggle:hover {
+      background: var(--plate);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Left Edge Hover Trigger Zone for Collapsed Sidebar */
+    .sidebar-hover-zone {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 60px;
+      z-index: 50;
+      display: none;
+      pointer-events: none;
+    }
+
+    .sidebar.collapsed ~ .sidebar-hover-zone {
+      display: block;
+      pointer-events: auto;
+    }
+
+    .btn-sidebar-expand {
+      position: absolute;
+      top: 0.85rem;
+      left: 0.85rem;
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      color: var(--chrome-ink);
+      cursor: pointer;
+      padding: 0.4rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      opacity: 0;
+      transform: translateX(-10px);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease, background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .sidebar-hover-zone:hover .btn-sidebar-expand {
+      opacity: 1;
+      transform: translateX(0);
+      pointer-events: auto;
+    }
+
+    .btn-sidebar-expand:hover {
+      background: var(--card-hover);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .sidebar-sections {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .section-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .section-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--ink-2);
+      padding: 0 1rem 0.5rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .section-count {
+      font-size: 0.7rem;
+      background: var(--badge-bg);
+      padding: 1px 6px;
+      color: var(--ink-2);
+    }
+
+    .item-list {
+      list-style: none;
+    }
+
+    .item-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 1rem;
+      font-size: 0.9rem;
+      color: var(--ink);
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: background 100ms ease, border-color 100ms ease;
+      user-select: none;
+    }
+
+    .item-row:hover {
+      background: var(--plate);
+    }
+
+    .item-row.active {
+      background: var(--plate);
+      border-left-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .item-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      margin-right: 0.5rem;
+    }
+
+    .doc-action-btn {
+      opacity: 0;
+      background: transparent;
+      border: none;
+      color: var(--ink-2);
+      cursor: pointer;
+      padding: 2px 5px;
+      font-size: 0.75rem;
+      transition: opacity 120ms ease, color 120ms ease;
+    }
+
+    .item-row:hover .doc-action-btn {
+      opacity: 1;
+    }
+
+    .doc-action-btn:hover {
+      color: var(--accent);
+    }
+
+    /* Main Stage (Split View between Reader and Chat) */
+    .main-stage {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Document Reader Drawer / Split Pane */
+    .doc-reader {
+      width: 48%;
+      border-right: 1px solid var(--rule);
+      background: var(--plate);
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+      animation: slideIn 180ms ease-out forwards;
+    }
+
+    @keyframes slideIn {
+      from { transform: translateX(-15px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    .doc-reader.open {
+      display: flex;
+    }
+
+    .doc-reader.expanded {
+      width: 100%;
+      flex: 1;
+    }
+
+    .doc-reader.expanded + .chat-pane {
+      display: none;
+    }
+
+    .reader-header {
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid var(--plate-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      background: var(--plate);
+      flex-shrink: 0;
+    }
+
+    .reader-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .reader-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--plate-ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: 0.05em;
+    }
+
+    .reader-nav-btn {
+      background: var(--badge-bg);
+      border: 1px solid var(--plate-border);
+      color: var(--accent);
+      padding: 0.2rem 0.6rem;
+      font-size: 0.75rem;
+      cursor: pointer;
+      font-family: inherit;
+      white-space: nowrap;
+      transition: background 120ms ease;
+    }
+
+    .reader-nav-btn:hover {
+      background: var(--card-hover);
+    }
+
+    .reader-pager {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.78rem;
+      color: var(--plate-ink-2);
+      user-select: none;
+    }
+
+    .pager-btn {
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      color: var(--plate-ink);
+      width: 26px;
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 0.7rem;
+      transition: background 120ms ease, color 120ms ease;
+    }
+
+    .pager-btn:hover:not(:disabled) {
+      background: var(--card-hover);
+      color: var(--accent);
+    }
+
+    .pager-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    #readerPageInput::-webkit-outer-spin-button,
+    #readerPageInput::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    #readerPageInput {
+      width: 58px;
+      min-width: 52px;
+      text-align: center;
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      color: var(--plate-ink);
+      font-family: inherit;
+      font-size: 0.82rem;
+      padding: 2px 4px;
+      outline: none;
+      -moz-appearance: textfield;
+      appearance: textfield;
+      border-radius: 2px;
+    }
+
+    #readerPageInput:focus {
+      border-color: var(--accent);
+    }
+
+    .reader-header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .reader-size-btn,
+    .reader-close-btn {
+      background: transparent;
+      border: none;
+      color: var(--plate-ink-2);
+      cursor: pointer;
+      font-size: 1.1rem;
+      padding: 0.2rem 0.4rem;
+      transition: color 120ms ease;
+    }
+
+    .reader-size-btn:hover,
+    .reader-close-btn:hover {
+      color: var(--plate-ink);
+    }
+
+    /* TOC Panel */
+    .reader-toc-panel {
+      background: var(--ground);
+      border-bottom: 1px solid var(--rule);
+      max-height: 220px;
+      overflow-y: auto;
+      padding: 0.75rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .toc-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.72rem;
+      letter-spacing: 0.15em;
+      color: var(--ink-2);
+      border-bottom: 1px solid var(--rule);
+      padding-bottom: 0.3rem;
+    }
+
+    .toc-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .toc-item {
+      font-size: 0.82rem;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      border-left: 2px solid transparent;
+      transition: background 100ms ease, color 100ms ease;
+    }
+
+    .toc-item:hover {
+      background: var(--plate);
+      border-left-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .reader-footer {
+      border-top: 1px solid var(--plate-border);
+      padding: 0.4rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.75rem;
+      color: var(--plate-ink-2);
+      background: var(--plate);
+      flex-shrink: 0;
+    }
+
+    .btn-footer-nav {
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--plate-ink);
+      padding: 0.25rem 0.75rem;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      transition: background 120ms ease;
+    }
+
+    .btn-footer-nav:hover:not(:disabled) {
+      background: var(--card-hover);
+      color: var(--accent);
+    }
+
+    .btn-footer-nav:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .reader-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2rem 3.5rem;
+      color: var(--plate-ink);
+      line-height: 1.8;
+      font-size: 1.05rem;
+      box-sizing: border-box;
+      width: 100%;
+    }
+
+    .reader-content h1, .reader-content h2, .reader-content h3 {
+      color: var(--plate-accent);
+      margin-top: 1.5rem;
+      margin-bottom: 0.75rem;
+      font-weight: 400;
+    }
+
+    .reader-content p {
+      margin-bottom: 1.25rem;
+      line-height: 1.8;
+      width: 100%;
+    }
+
+    .reader-content blockquote {
+      border-left: 2px solid var(--plate-accent);
+      padding-left: 1.25rem;
+      margin: 1.25rem 0;
+      color: var(--plate-ink-2);
+      font-style: italic;
+    }
+
+    .reader-content pre {
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      overflow-x: auto;
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    .reader-content pre strong,
+    .reader-content pre b {
+      font-weight: 400;
+    }
+
+    .reader-content pre em,
+    .reader-content pre i {
+      font-style: italic;
+      font-weight: 200;
+    }
+
+    /* Chat Area */
+    .chat-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    .chat-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .chat-container {
+      max-width: 780px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    /* Welcome Card */
+    .welcome-card {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      padding: 2rem;
+      margin: 1rem 0;
+      text-align: left;
+    }
+
+    .welcome-card h2 {
+      font-size: 1.5rem;
+      color: var(--accent);
+      font-weight: 400;
+      margin-bottom: 0.75rem;
+    }
+
+    .welcome-card p {
+      color: var(--plate-ink);
+      margin-bottom: 1rem;
+      line-height: 1.6;
+    }
+
+    .welcome-features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1.25rem;
+    }
+
+    .feature-box {
+      border: 1px solid var(--plate-border);
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+    }
+
+    .feature-box strong {
+      display: block;
+      color: var(--accent);
+      margin-bottom: 0.25rem;
+      font-size: 0.9rem;
+    }
+
+    /* Messages */
+    .message {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-width: 100%;
+      word-break: break-word;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      max-width: 85%;
+    }
+
+    .message.user .bubble {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      color: var(--plate-ink);
+      padding: 0.75rem 1.25rem;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      width: 100%;
+    }
+
+    .message.assistant .bubble {
+      background: transparent;
+      color: var(--ink);
+      padding: 0.5rem 0;
+      line-height: 1.65;
+    }
+
+    .message-meta {
+      font-size: 0.72rem;
+      color: var(--ink-2);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    /* Markdown Formatted Typography */
+    .markdown-body {
+      font-size: 1.05rem;
+    }
+
+    .markdown-body p {
+      margin-bottom: 0.85rem;
+    }
+
+    .markdown-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .markdown-body strong {
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .markdown-body em {
+      font-style: italic;
+    }
+
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+      font-weight: 400;
+      color: var(--accent);
+      margin: 1.25rem 0 0.5rem 0;
+      line-height: 1.3;
+    }
+
+    .markdown-body ul, .markdown-body ol {
+      margin: 0.75rem 0;
+      padding-left: 1.5rem;
+    }
+
+    .markdown-body li {
+      margin-bottom: 0.35rem;
+    }
+
+    .markdown-body blockquote {
+      border-left: 2px solid var(--accent);
+      padding-left: 1rem;
+      margin: 0.75rem 0;
+      color: var(--ink-2);
+      font-style: italic;
+    }
+
+    .markdown-body pre {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      padding: 0.75rem 1rem;
+      margin: 0.75rem 0;
+      overflow-x: auto;
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+      font-size: 0.88rem;
+      color: var(--plate-ink);
+      line-height: 1.6;
+    }
+
+    .markdown-body pre strong,
+    .markdown-body pre b {
+      font-weight: 400;
+    }
+
+    .markdown-body pre em,
+    .markdown-body pre i {
+      font-style: italic;
+      font-weight: 200;
+    }
+
+    .markdown-body code:not(pre code) {
+      background: var(--badge-bg);
+      border: 1px solid var(--plate-border);
+      padding: 0.1rem 0.35rem;
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+      font-size: 0.88em;
+      color: var(--plate-ink);
+    }
+
+    .markdown-body code strong,
+    .markdown-body code b {
+      font-weight: 400;
+    }
+
+    .markdown-body code em,
+    .markdown-body code i {
+      font-style: italic;
+      font-weight: 200;
+    }
+
+    /* Citation Accordion Cards */
+    .citations-panel {
+      margin-top: 0.75rem;
+      border: 1px solid var(--rule);
+      background: var(--plate);
+      font-size: 0.85rem;
+    }
+
+    .citations-toggle {
+      padding: 0.5rem 0.85rem;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--ink-2);
+      user-select: none;
+    }
+
+    .citations-toggle:hover {
+      color: var(--accent);
+    }
+
+    .citations-list {
+      border-top: 1px solid var(--rule);
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .citation-card {
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      padding: 0.6rem 0.75rem;
+    }
+
+    .citation-card-title {
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 0.25rem;
+      font-size: 0.82rem;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .citation-snippet {
+      font-size: 0.8rem;
+      color: var(--ink-2);
+      line-height: 1.45;
+    }
+
+    /* Live Status Pulse and Telemetry */
+    .live-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.65rem;
+      font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: 200;
+      font-style: italic;
+      font-size: 0.9rem;
+      color: var(--ink-2);
+      letter-spacing: 0.02em;
+    }
+
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      animation: pulse-glow 1.4s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% {
+        opacity: 0.35;
+        transform: scale(0.85);
+      }
+      50% {
+        opacity: 1;
+        transform: scale(1.2);
+      }
+    }
+
+    /* Unified Input Deck */
+    .input-deck {
+      border-top: 1px solid var(--rule);
+      background: transparent;
+      padding: 1rem 1.5rem;
+      flex-shrink: 0;
+    }
+
+    .input-container {
+      max-width: 780px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      padding: 0.75rem 1rem;
+      transition: border-color 150ms ease;
+    }
+
+    .input-container:focus-within {
+      border-color: var(--accent);
+    }
+
+    /* Attached File Pill */
+    .attached-file-row {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      background: var(--badge-bg);
+      border: 1px solid var(--plate-border);
+      padding: 0.3rem 0.6rem;
+      color: var(--plate-ink);
+      width: fit-content;
+    }
+
+    .attached-file-row.visible {
+      display: flex;
+    }
+
+    .attached-file-row button {
+      background: transparent;
+      border: none;
+      color: var(--ink-2);
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+    }
+
+    .attached-file-row button:hover {
+      color: var(--accent);
+    }
+
+    .chat-textarea {
+      width: 100%;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--plate-ink);
+      font-family: inherit;
+      font-size: 1rem;
+      line-height: 1.5;
+      resize: none;
+      max-height: 180px;
+      min-height: 48px;
+    }
+
+    .chat-textarea::placeholder {
+      color: var(--plate-ink-2);
+    }
+
+    .input-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--plate-border);
+      padding-top: 0.6rem;
+      margin-top: 0.2rem;
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .btn-attach {
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--plate-ink);
+      cursor: pointer;
+      padding: 0.3rem 0.6rem;
+      font-size: 0.78rem;
+      font-family: inherit;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: background 120ms ease;
+    }
+
+    .btn-attach:hover {
+      background: var(--card-hover);
+      color: var(--accent);
+    }
+
+    /* Add to Library Toggle */
+    .toggle-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--plate-ink-2);
+      user-select: none;
+    }
+
+    .toggle-label input {
+      display: none;
+    }
+
+    .toggle-switch {
+      width: 32px;
+      height: 18px;
+      background: var(--field-border);
+      display: inline-block;
+      position: relative;
+      transition: background 150ms ease;
+    }
+
+    .toggle-switch::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      background: var(--plate-ink);
+      transition: transform 150ms ease;
+    }
+
+    .toggle-label input:checked + .toggle-switch {
+      background: var(--accent);
+    }
+
+    .toggle-label input:checked + .toggle-switch::after {
+      transform: translateX(14px);
+      background: var(--ground);
+    }
+
+    .toggle-label input:checked ~ .toggle-text {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .hint-text {
+      font-size: 0.72rem;
+      color: var(--plate-ink-2);
+    }
+
+    .btn-send {
+      background: var(--accent);
+      color: var(--ground);
+      border: none;
+      padding: 0.4rem 1.25rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+
+    .btn-send:hover {
+      background: var(--gold-sheen);
+    }
+
+    .btn-send:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Usage Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(18, 16, 13, 0.75);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal-overlay.open {
+      display: flex;
+    }
+
+    .modal-card {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      width: 90%;
+      max-width: 580px;
+      padding: 1.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--plate-border);
+      padding-bottom: 0.75rem;
+    }
+
+    .modal-header h3 {
+      font-size: 1.2rem;
+      color: var(--accent);
+      font-weight: 400;
+      letter-spacing: 0.05em;
+    }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--plate-ink-2);
+      font-size: 1.2rem;
+      cursor: pointer;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+    }
+
+    .metric-box {
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      padding: 0.75rem 1rem;
+    }
+
+    .metric-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--ink-2);
+    }
+
+    .metric-value {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--ink);
+      margin-top: 0.25rem;
+    }
+
+    .progress-bar-wrap {
+      background: var(--ground);
+      border: 1px solid var(--rule);
+      height: 10px;
+      width: 100%;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 200ms ease;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Band -->
+  <header class="band">
+    <div class="band-inner">
+      <div class="brand-group">
+        <a href="#" class="wordmark" aria-label="Wollyce"><span class="logo-mark" aria-hidden="true">W<span class="logo-grow"><span class="logo-grow-inner">ollyce</span></span></span></a>
+        <span class="app-tag mono">Personal Tutor</span>
+      </div>
+
+      <div class="header-controls">
+        <div class="status-pill mono" id="openModalBtn">
+          <span class="status-dot"></span>
+          <span id="headerModel">Gemini 3.1 Flash Lite</span>
+          <span>|</span>
+          <span id="headerUsage">0 / 2,000,000</span>
+          <span>|</span>
+          <strong id="headerCost">$0.00</strong>
+        </div>
+
+        <button type="button" class="lamp-toggle" id="lampToggle" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- App Body Layout -->
+  <div class="app-layout">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <button class="btn-new-chat" id="newChatBtn">
+          <span>+</span> New Chat
+        </button>
+        <button type="button" class="btn-sidebar-toggle" id="sidebarCollapseBtn" aria-label="Collapse sidebar" title="Collapse sidebar">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="9" y1="3" x2="9" y2="21"></line>
+            <polyline points="15 9 12 12 15 15"></polyline>
+          </svg>
+        </button>
+      </div>
+
+      <div class="sidebar-sections">
+        <!-- Chats Section -->
+        <div class="section-group">
+          <div class="section-title">
+            <span>Recent Chats</span>
+            <span class="section-count mono" id="chatsCount">0</span>
+          </div>
+          <ul class="item-list" id="chatsList">
+            <!-- Populated dynamically -->
+          </ul>
+        </div>
+
+        <!-- Knowledge Base Documents Section -->
+        <div class="section-group">
+          <div class="section-title">
+            <span>Knowledge Base</span>
+            <span class="section-count mono" id="docsCount">0</span>
+          </div>
+          <ul class="item-list" id="docsList">
+            <!-- Populated dynamically -->
+          </ul>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Left Edge Hover Zone to Reveal Expand Button When Collapsed -->
+    <div class="sidebar-hover-zone" id="sidebarHoverZone">
+      <button type="button" class="btn-sidebar-expand" id="sidebarExpandBtn" aria-label="Expand sidebar" title="Expand sidebar">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="9" y1="3" x2="9" y2="21"></line>
+          <polyline points="13 9 16 12 13 15"></polyline>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Main Stage (Split View) -->
+    <main class="main-stage">
+      <!-- Document Reader Pane -->
+      <section class="doc-reader" id="docReader">
+        <div class="reader-header">
+          <div class="reader-header-left">
+            <button class="reader-nav-btn mono" id="readerTocBtn">Contents</button>
+            <div class="reader-title mono" id="readerDocTitle">Document Name</div>
+          </div>
+          <div class="reader-pager mono">
+            <button class="pager-btn" id="readerPrevBtn" title="Previous page">◀</button>
+            <span>Page</span>
+            <input type="number" id="readerPageInput" min="1" value="1">
+            <span>of <span id="readerTotalPages">1</span></span>
+            <button class="pager-btn" id="readerNextBtn" title="Next page">▶</button>
+          </div>
+          <div class="reader-header-right">
+            <button class="reader-size-btn" id="readerExpandBtn" title="Expand width">⛶</button>
+            <button class="reader-close-btn" id="closeReaderBtn" title="Close reader">✕</button>
+          </div>
+        </div>
+
+        <!-- Table of Contents Drawer -->
+        <div class="reader-toc-panel" id="readerTocPanel" style="display: none;">
+          <div class="toc-header mono">
+            <span>Table of Contents</span>
+            <span id="readerTocCount">0 sections</span>
+          </div>
+          <ul class="toc-list" id="readerTocList">
+            <!-- Populated dynamically -->
+          </ul>
+        </div>
+
+        <div class="reader-content markdown-body" id="readerDocContent">
+          <!-- Populated dynamically -->
+        </div>
+
+        <!-- Reader Footer Pager -->
+        <div class="reader-footer mono">
+          <button class="btn-footer-nav" id="readerFooterPrevBtn">Previous Page</button>
+          <span id="readerFooterPageLabel">Page 1 of 1</span>
+          <button class="btn-footer-nav" id="readerFooterNextBtn">Next Page</button>
+        </div>
+      </section>
+
+      <!-- Chat Pane -->
+      <section class="chat-pane">
+        <div class="chat-scroll" id="chatScroll">
+          <div class="chat-container" id="chatContainer">
+            <!-- Welcome Banner when conversation is empty -->
+            <div class="welcome-card" id="welcomeCard">
+              <h2>Socratic Inquiry on Your Material</h2>
+              <p>
+                Wollyce is your private, local-first tutor. It reads your personal notes and books using deterministic search from Ulpia, then asks guided questions to test your real understanding.
+              </p>
+              <div class="welcome-features">
+                <div class="feature-box">
+                  <strong>Zero-Embedding Memory</strong>
+                  Retrieved locally in Rust using keyword fusion without sending your files to vector databases.
+                </div>
+                <div class="feature-box">
+                  <strong>Strict Format Safety</strong>
+                  Ingests exclusively <code>.pdf</code>, <code>.txt</code>, and <code>.md</code> documents.
+                </div>
+                <div class="feature-box">
+                  <strong>Active Recall Method</strong>
+                  Guided questions rather than passive answers, testing your knowledge retention.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Unified Input Deck -->
+        <div class="input-deck">
+          <div class="input-container">
+            <!-- File Attached Row -->
+            <div class="attached-file-row mono" id="attachedFileRow">
+              <span id="attachedFileName">document.pdf</span>
+              <button type="button" id="removeAttachedBtn" title="Remove attachment">✕</button>
+            </div>
+
+            <!-- Text Input -->
+            <textarea
+              class="chat-textarea"
+              id="messageInput"
+              rows="2"
+              placeholder="Ask a question, or paste text to learn..."
+            ></textarea>
+
+            <!-- Bottom Toolbar -->
+            <div class="input-toolbar">
+              <div class="toolbar-left">
+                <!-- Attach Button -->
+                <button type="button" class="btn-attach mono" id="attachBtn">
+                  <span>📎</span> Attach (.pdf, .txt, .md)
+                </button>
+                <input type="file" id="fileInput" accept=".pdf,.txt,.md" style="display: none;">
+
+                <!-- Add to Library Toggle -->
+                <label class="toggle-label">
+                  <input type="checkbox" id="ingestToggle">
+                  <span class="toggle-switch"></span>
+                  <span class="toggle-text mono">Add to Library</span>
+                </label>
+              </div>
+
+              <div class="toolbar-right">
+                <span class="hint-text mono">Enter to send, Shift+Enter for new line</span>
+                <button type="button" class="btn-send mono" id="sendBtn">Send</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Usage & Subscription Modal -->
+  <div class="modal-overlay" id="usageModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Account & Usage Telemetry</h3>
+        <button class="modal-close" id="closeModalBtn">✕</button>
+      </div>
+
+      <div>
+        <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.25rem;">
+          <span>Monthly Token Cap</span>
+          <span class="mono" id="modalTokenPercent">0%</span>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-fill" id="modalProgressFill"></div>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric-box">
+          <div class="metric-label mono">Total Tokens</div>
+          <div class="metric-value mono" id="modalTotalTokens">0</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label mono">Estimated Cost (USD)</div>
+          <div class="metric-value mono" id="modalTotalCost">$0.00</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label mono">Prompt Tokens</div>
+          <div class="metric-value mono" id="modalPromptTokens">0</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label mono">Completion Tokens</div>
+          <div class="metric-value mono" id="modalCompletionTokens">0</div>
+        </div>
+      </div>
+
+      <div style="font-size: 0.8rem; color: var(--ink-2); line-height: 1.5; border-top: 1px solid var(--plate-border); padding-top: 0.75rem;">
+        Usage is billed on a flat monthly subscription. Metering protects system sustainability by tracking real provider costs in local SQLite.
+      </div>
+    </div>
+  </div>
+
+  <!-- Embedded JS Logic & Markdown Engine -->
+  <script>
+    /* ==========================================================================
+       1. Embedded Client-side Markdown Engine (Offline, Secure, Zero-dependency)
+       ========================================================================== */
+    function escapeHtml(str) {
+      if (!str) return "";
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    // Prohibits all dashes, em dashes, en dashes and transforms markdown to semantic HTML
+    function renderMarkdown(raw) {
+      if (!raw) return "";
+
+      let text = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+      // Step A: Strip em dashes, en dashes, and double hyphens strictly
+      text = text
+        .replace(/\u2014/g, ", ")
+        .replace(/\u2013/g, ", ")
+        .replace(/ -- /g, ", ")
+        .replace(/--/g, ", ");
+
+      // Step B: Extract and protect code blocks (use underscore-free tokens)
+      const codeBlocks = [];
+      text = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(match, lang, code) {
+        const id = "%%WCKBLOCK" + codeBlocks.length + "%%";
+        codeBlocks.push("<pre><code>" + escapeHtml(code.trim()) + "</code></pre>");
+        return id;
+      });
+
+      // Step C: Extract and protect inline code (use underscore-free tokens)
+      const inlineCodes = [];
+      text = text.replace(/`([^`\n]+)`/g, function(match, code) {
+        const id = "%%WCKCODE" + inlineCodes.length + "%%";
+        inlineCodes.push("<code>" + escapeHtml(code) + "</code>");
+        return id;
+      });
+
+      // Step D: Escape all remaining HTML entities to prevent XSS
+      text = escapeHtml(text);
+
+      // Step E: Headers
+      text = text.replace(/^### (.*$)/gim, "<h3>$1</h3>");
+      text = text.replace(/^## (.*$)/gim, "<h2>$1</h2>");
+      text = text.replace(/^# (.*$)/gim, "<h1>$1</h1>");
+
+      // Step F: Blockquotes
+      text = text.replace(/^\> (.*$)/gim, "<blockquote>$1</blockquote>");
+
+      // Step G: Bold & Italic
+      // Asterisks for bold & italic
+      text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      text = text.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+
+      // Underscores only on word boundaries (never inside snake_case words like Eloquent_JavaScript_small)
+      text = text.replace(/(^|[\s(>])__([^_ \n][^_]*?[^_ \n])__(?=[ \t\r\n.,;:!?)]|$)/g, "$1<strong>$2</strong>");
+      text = text.replace(/(^|[\s(>])_([^_ \n][^_]*?[^_ \n])_(?=[ \t\r\n.,;:!?)]|$)/g, "$1<em>$2</em>");
+
+      // Step H: Lists (Unordered & Ordered)
+      const lines = text.split("\n");
+      const processed = [];
+      let inUl = false;
+      let inOl = false;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const ulMatch = line.match(/^[\*\-]\s+(.*)/);
+        const olMatch = line.match(/^\d+\.\s+(.*)/);
+
+        if (ulMatch) {
+          if (!inUl) {
+            if (inOl) { processed.push("</ol>"); inOl = false; }
+            processed.push("<ul>");
+            inUl = true;
+          }
+          processed.push("<li>" + ulMatch[1] + "</li>");
+        } else if (olMatch) {
+          if (!inOl) {
+            if (inUl) { processed.push("</ul>"); inUl = false; }
+            processed.push("<ol>");
+            inOl = true;
+          }
+          processed.push("<li>" + olMatch[1] + "</li>");
+        } else {
+          if (inUl) { processed.push("</ul>"); inUl = false; }
+          if (inOl) { processed.push("</ol>"); inOl = false; }
+          processed.push(line);
+        }
+      }
+      if (inUl) processed.push("</ul>");
+      if (inOl) processed.push("</ol>");
+      text = processed.join("\n");
+
+      // Step I: Paragraphs
+      text = text
+        .split(/\n\s*\n/)
+        .map(function(para) {
+          const trimmed = para.trim();
+          if (!trimmed) return "";
+          if (trimmed.startsWith("<h") || trimmed.startsWith("<pre") || trimmed.startsWith("<ul") || trimmed.startsWith("<ol") || trimmed.startsWith("<blockquote")) {
+            return trimmed;
+          }
+
+          // Check if lines are indented with 4+ spaces (preformatted code or diagram)
+          const paraLines = trimmed.split("\n");
+          if (paraLines.length > 0 && paraLines.every(function(l) { return !l.trim() || /^(?: {4,}|\t)/.test(l); })) {
+            return "<pre><code>" + paraLines.map(function(l) { return l.replace(/^(?: {4}|\t)/, ""); }).join("\n") + "</code></pre>";
+          }
+
+          // 1. Join hyphenated line breaks (e.g. "fundamen-\ntally" -> "fundamentally")
+          let cleanedPara = trimmed.replace(/([a-zA-ZÀ-ÿ])-\s*\n\s*([a-zA-ZÀ-ÿ])/g, "$1$2");
+
+          // 2. Lines ending with 2 spaces or explicit backslash become <br>
+          cleanedPara = cleanedPara.replace(/(?: {2,}|\\)\n/g, "<br>");
+
+          // 3. Convert soft line breaks inside paragraph to a single space so text auto-regulates to full container width
+          cleanedPara = cleanedPara.replace(/\n+/g, " ");
+
+          // 4. Collapse multiple spaces within prose paragraph to single space
+          cleanedPara = cleanedPara.replace(/[ \t]{2,}/g, " ");
+
+          // Ignore standalone trailing page number artifacts from printed books (e.g. "15")
+          if (/^\d{1,4}$/.test(cleanedPara)) {
+            return "";
+          }
+
+          return "<p>" + cleanedPara + "</p>";
+        })
+        .filter(Boolean)
+        .join("\n");
+
+      // Step J: Restore inline codes and code blocks
+      inlineCodes.forEach(function(codeHtml, index) {
+        const id = "%%WCKCODE" + index + "%%";
+        text = text.split(id).join(codeHtml);
+      });
+      codeBlocks.forEach(function(codeHtml, index) {
+        const id = "%%WCKBLOCK" + index + "%%";
+        text = text.split(id).join(codeHtml);
+      });
+
+      // Defensive recovery for any legacy messages stored in localStorage with old mangled placeholders
+      text = text.replace(/@@INLINE(?:<em>CODE<\/em>|_CODE_)?(\d+)@@/g, "<code>code</code>");
+
+      return text;
+    }
+
+    // Benchmark and Security Self-Test
+    (function runEngineSelfTest() {
+      const start = performance.now();
+      const testSample = "# Header 1\n**Bold statement** and *italic word* with `--` dash.\nTest `inline_code_example` here.\n> A quote here\n\n- Item 1\n- Item 2\n\n```javascript\nconst a = 1 < 2;\n```\n<script>alert('xss');<\/script>";
+      const result = renderMarkdown(testSample);
+      const duration = (performance.now() - start).toFixed(2);
+      const passedSecurity = !result.includes("<script>") && result.includes("&lt;script&gt;");
+      const passedNoDash = !result.includes("\u2014") && !result.includes("\u2013") && !result.includes("--");
+      const passedInlineCode = result.includes("<code>inline_code_example</code>");
+      console.log(`[Wollyce Engine] Verified in ${duration}ms | XSS Guard: ${passedSecurity ? "OK" : "FAIL"} | Dash Ban: ${passedNoDash ? "OK" : "FAIL"} | Code Tokens: ${passedInlineCode ? "OK" : "FAIL"}`);
+    })();
+
+    /* ==========================================================================
+       2. Application State & Storage
+       ========================================================================== */
+    const state = {
+      sessions: JSON.parse(localStorage.getItem("wollyce_sessions") || "[]"),
+      currentSessionId: null,
+      documents: [],
+      attachedFile: null,
+      theme: localStorage.getItem("wollyce_theme") || "dark",
+    };
+
+    // Apply saved theme
+    document.documentElement.setAttribute("data-theme", state.theme);
+
+    /* ==========================================================================
+       3. DOM Elements
+       ========================================================================== */
+    const lampToggle = document.getElementById("lampToggle");
+    const openModalBtn = document.getElementById("openModalBtn");
+    const closeModalBtn = document.getElementById("closeModalBtn");
+    const usageModal = document.getElementById("usageModal");
+    const newChatBtn = document.getElementById("newChatBtn");
+    const chatsList = document.getElementById("chatsList");
+    const chatsCount = document.getElementById("chatsCount");
+    const docsList = document.getElementById("docsList");
+    const docsCount = document.getElementById("docsCount");
+    const docReader = document.getElementById("docReader");
+    const readerDocTitle = document.getElementById("readerDocTitle");
+    const readerDocContent = document.getElementById("readerDocContent");
+    const closeReaderBtn = document.getElementById("closeReaderBtn");
+    const readerTocBtn = document.getElementById("readerTocBtn");
+    const readerPrevBtn = document.getElementById("readerPrevBtn");
+    const readerNextBtn = document.getElementById("readerNextBtn");
+    const readerPageInput = document.getElementById("readerPageInput");
+    const readerTotalPages = document.getElementById("readerTotalPages");
+    const readerExpandBtn = document.getElementById("readerExpandBtn");
+    const readerTocPanel = document.getElementById("readerTocPanel");
+    const readerTocCount = document.getElementById("readerTocCount");
+    const readerTocList = document.getElementById("readerTocList");
+    const readerFooterPrevBtn = document.getElementById("readerFooterPrevBtn");
+    const readerFooterNextBtn = document.getElementById("readerFooterNextBtn");
+    const readerFooterPageLabel = document.getElementById("readerFooterPageLabel");
+
+    const readerState = {
+      docName: "",
+      pages: [],
+      currentPage: 0,
+      toc: [],
+      keywordsHtml: ""
+    };
+    const chatScroll = document.getElementById("chatScroll");
+    const chatContainer = document.getElementById("chatContainer");
+    const welcomeCard = document.getElementById("welcomeCard");
+    const messageInput = document.getElementById("messageInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const attachBtn = document.getElementById("attachBtn");
+    const fileInput = document.getElementById("fileInput");
+    const attachedFileRow = document.getElementById("attachedFileRow");
+    const attachedFileName = document.getElementById("attachedFileName");
+    const removeAttachedBtn = document.getElementById("removeAttachedBtn");
+    const ingestToggle = document.getElementById("ingestToggle");
+
+    // Header & Modal metrics
+    const headerModel = document.getElementById("headerModel");
+    const headerUsage = document.getElementById("headerUsage");
+    const headerCost = document.getElementById("headerCost");
+    const modalTokenPercent = document.getElementById("modalTokenPercent");
+    const modalProgressFill = document.getElementById("modalProgressFill");
+    const modalTotalTokens = document.getElementById("modalTotalTokens");
+    const modalTotalCost = document.getElementById("modalTotalCost");
+    const modalPromptTokens = document.getElementById("modalPromptTokens");
+    const modalCompletionTokens = document.getElementById("modalCompletionTokens");
+
+    /* ==========================================================================
+       4. Event Listeners & Interaction
+       ========================================================================== */
+
+    // Sidebar Collapse and Expand
+    const sidebarEl = document.querySelector(".sidebar");
+    const sidebarCollapseBtn = document.getElementById("sidebarCollapseBtn");
+    const sidebarExpandBtn = document.getElementById("sidebarExpandBtn");
+
+    function setSidebarCollapsed(collapsed) {
+      if (!sidebarEl) return;
+      if (collapsed) {
+        sidebarEl.classList.add("collapsed");
+        localStorage.setItem("wollyce_sidebar_collapsed", "true");
+      } else {
+        sidebarEl.classList.remove("collapsed");
+        localStorage.setItem("wollyce_sidebar_collapsed", "false");
+      }
+    }
+
+    if (sidebarCollapseBtn) {
+      sidebarCollapseBtn.addEventListener("click", () => setSidebarCollapsed(true));
+    }
+    if (sidebarExpandBtn) {
+      sidebarExpandBtn.addEventListener("click", () => setSidebarCollapsed(false));
+    }
+
+    if (localStorage.getItem("wollyce_sidebar_collapsed") === "true") {
+      setSidebarCollapsed(true);
+    }
+
+    // Theme toggle
+    lampToggle.addEventListener("click", () => {
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", state.theme);
+      localStorage.setItem("wollyce_theme", state.theme);
+    });
+
+    // Modal
+    openModalBtn.addEventListener("click", () => usageModal.classList.add("open"));
+    closeModalBtn.addEventListener("click", () => usageModal.classList.remove("open"));
+    usageModal.addEventListener("click", (e) => {
+      if (e.target === usageModal) usageModal.classList.remove("open");
+    });
+
+    // Close Reader
+    closeReaderBtn.addEventListener("click", () => {
+      docReader.classList.remove("open");
+      docReader.classList.remove("expanded");
+      readerExpandBtn.textContent = "⛶";
+      readerTocPanel.style.display = "none";
+    });
+
+    // Reader Pager and Navigation
+    readerPrevBtn.addEventListener("click", prevPage);
+    readerNextBtn.addEventListener("click", nextPage);
+    readerFooterPrevBtn.addEventListener("click", prevPage);
+    readerFooterNextBtn.addEventListener("click", nextPage);
+
+    readerPageInput.addEventListener("change", () => {
+      const pageVal = parseInt(readerPageInput.value, 10);
+      if (!isNaN(pageVal)) {
+        goToPage(pageVal - 1);
+      }
+    });
+
+    readerPageInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        readerPageInput.blur();
+      }
+    });
+
+    // TOC Toggle
+    readerTocBtn.addEventListener("click", () => {
+      const isVisible = readerTocPanel.style.display !== "none";
+      readerTocPanel.style.display = isVisible ? "none" : "flex";
+    });
+
+    // Full Width Toggle
+    readerExpandBtn.addEventListener("click", () => {
+      docReader.classList.toggle("expanded");
+      const isExpanded = docReader.classList.contains("expanded");
+      readerExpandBtn.textContent = isExpanded ? "❐" : "⛶";
+      readerExpandBtn.title = isExpanded ? "Restore width" : "Expand width";
+    });
+
+    // Keyboard Arrow navigation when reader is open
+    window.addEventListener("keydown", (e) => {
+      if (!docReader.classList.contains("open")) return;
+      const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea") return;
+
+      if (e.key === "ArrowLeft" || e.key === "PageUp") {
+        e.preventDefault();
+        prevPage();
+      } else if (e.key === "ArrowRight" || e.key === "PageDown") {
+        e.preventDefault();
+        nextPage();
+      }
+    });
+
+    // New Chat
+    newChatBtn.addEventListener("click", () => {
+      createNewSession();
+    });
+
+    // File Attachments
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const ext = file.name.split(".").pop().toLowerCase();
+      if (!["pdf", "txt", "md"].includes(ext)) {
+        alert("Only .pdf, .txt, and .md files are allowed.");
+        fileInput.value = "";
+        return;
+      }
+
+      state.attachedFile = file;
+      attachedFileName.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+      attachedFileRow.classList.add("visible");
+      // If user attaches a file, automatically turn on Add to Library as helpful default
+      ingestToggle.checked = true;
+    });
+
+    removeAttachedBtn.addEventListener("click", () => {
+      state.attachedFile = null;
+      fileInput.value = "";
+      attachedFileRow.classList.remove("visible");
+    });
+
+    // Textarea Auto-expand & Enter to Send
+    messageInput.addEventListener("input", () => {
+      messageInput.style.height = "auto";
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + "px";
+    });
+
+    messageInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        submitMessage();
+      }
+    });
+
+    sendBtn.addEventListener("click", submitMessage);
+
+    /* ==========================================================================
+       5. Session & Messaging Logic
+       ========================================================================== */
+    function saveSessions() {
+      try {
+        localStorage.setItem("wollyce_sessions", JSON.stringify(state.sessions));
+      } catch (err) {
+        console.warn("Storage quota limit reached, trimming history:", err);
+      }
+      renderSessionsList();
+    }
+
+    function createNewSession() {
+      const newSession = {
+        id: "sess_" + Date.now(),
+        title: "New Session",
+        messages: [],
+        createdAt: new Date().toISOString()
+      };
+      state.sessions.unshift(newSession);
+      state.currentSessionId = newSession.id;
+      saveSessions();
+      renderChatMessages();
+      messageInput.focus();
+    }
+
+    function getCurrentSession() {
+      if (!state.currentSessionId && state.sessions.length > 0) {
+        state.currentSessionId = state.sessions[0].id;
+      }
+      return state.sessions.find(s => s.id === state.currentSessionId);
+    }
+
+    function renderSessionsList() {
+      chatsList.innerHTML = "";
+      chatsCount.textContent = state.sessions.length;
+
+      state.sessions.forEach(sess => {
+        const li = document.createElement("li");
+        li.className = "item-row" + (sess.id === state.currentSessionId ? " active" : "");
+        li.innerHTML = `
+          <span class="item-name">${escapeHtml(sess.title)}</span>
+          <button class="doc-action-btn" title="Delete chat">✕</button>
+        `;
+
+        li.querySelector(".item-name").addEventListener("click", () => {
+          state.currentSessionId = sess.id;
+          renderSessionsList();
+          renderChatMessages();
+        });
+
+        li.querySelector(".doc-action-btn").addEventListener("click", (e) => {
+          e.stopPropagation();
+          state.sessions = state.sessions.filter(s => s.id !== sess.id);
+          if (state.currentSessionId === sess.id) {
+            state.currentSessionId = state.sessions[0] ? state.sessions[0].id : null;
+          }
+          saveSessions();
+          renderChatMessages();
+        });
+
+        chatsList.appendChild(li);
+      });
+    }
+
+    function renderChatMessages() {
+      const session = getCurrentSession();
+      chatContainer.innerHTML = "";
+
+      if (!session || session.messages.length === 0) {
+        chatContainer.appendChild(welcomeCard);
+        welcomeCard.style.display = "block";
+        return;
+      }
+
+      welcomeCard.style.display = "none";
+
+      session.messages.forEach(msg => {
+        const msgDiv = document.createElement("div");
+        msgDiv.className = `message ${msg.role}`;
+
+        if (msg.role === "user") {
+          msgDiv.innerHTML = `
+            <div class="message-meta"><span>You</span></div>
+            <div class="bubble">${escapeHtml(msg.text)}</div>
+          `;
+        } else {
+          let citationsHtml = "";
+          if (msg.citations && msg.citations.length > 0) {
+            const cards = msg.citations.map(c => `
+              <div class="citation-card">
+                <div class="citation-card-title">
+                  <span>${escapeHtml(c.title)}</span>
+                  <span class="mono">${escapeHtml(c.path)}</span>
+                </div>
+                <div class="citation-snippet">${escapeHtml(c.snippet)}</div>
+              </div>
+            `).join("");
+
+            citationsHtml = `
+              <div class="citations-panel">
+                <div class="citations-toggle" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'flex' : 'none'">
+                  <span>Referenced Material (${msg.citations.length})</span>
+                  <span>▾</span>
+                </div>
+                <div class="citations-list" style="display: none;">
+                  ${cards}
+                </div>
+              </div>
+            `;
+          }
+
+          msgDiv.innerHTML = `
+            <div class="message-meta">
+              <span>Wollyce</span>
+              ${msg.abstained ? '<span style="color: var(--accent);">• Outside Uploaded Material</span>' : ''}
+            </div>
+            <div class="bubble markdown-body">${renderMarkdown(msg.text)}</div>
+            ${citationsHtml}
+          `;
+        }
+
+        chatContainer.appendChild(msgDiv);
+      });
+
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+    }
+
+    /* ==========================================================================
+       6. Message Submission (Chat or Ingestion)
+       ========================================================================== */
+    async function submitMessage() {
+      const text = messageInput.value.trim();
+      const isIngestMode = ingestToggle.checked;
+      const file = state.attachedFile;
+
+      if (!text && !file) return;
+
+      let session = getCurrentSession();
+      if (!session) {
+        createNewSession();
+        session = getCurrentSession();
+      }
+
+      // If this is the first message in session, assign a title from query
+      if (session.messages.length === 0) {
+        const titleProposal = file ? file.name : text.slice(0, 30);
+        session.title = titleProposal;
+        saveSessions();
+      }
+
+      sendBtn.disabled = true;
+
+      // MODE 1: Ingest Material into Permanent Knowledge Base
+      if (isIngestMode) {
+        const loadingDiv = document.createElement("div");
+        loadingDiv.className = "message user";
+        loadingDiv.innerHTML = `
+          <div class="message-meta"><span>Library Addition</span></div>
+          <div class="bubble">Distilling and indexing into knowledge base: ${escapeHtml(file ? file.name : text.slice(0, 50))}...</div>
+        `;
+        chatContainer.appendChild(loadingDiv);
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+
+        try {
+          let payload = {};
+          if (file) {
+            const ext = file.name.split(".").pop().toLowerCase();
+            const cleanTitle = file.name.replace(/\.[^/.]+$/, "");
+            if (ext === "pdf") {
+              const base64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const res = reader.result;
+                  resolve(res.includes(",") ? res.split(",")[1] : res);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              });
+              payload = {
+                title: cleanTitle,
+                pdf_base64: base64
+              };
+            } else {
+              const content = await file.text();
+              payload = {
+                title: cleanTitle,
+                content: content
+              };
+            }
+          } else {
+            payload = {
+              title: text.slice(0, 30),
+              content: text
+            };
+          }
+
+          const res = await fetch("/api/ingest", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+
+          if (data.ok) {
+            session.messages.push({
+              role: "user",
+              text: `Added to library: ${data.title}`
+            });
+            session.messages.push({
+              role: "assistant",
+              text: `**Material Successfully Indexed!**\n\nThe document **${data.title}** has been distilled and saved to \`${data.saved_to}\`.\n\nIt is now immediately available in your left sidebar. You can ask questions about it or click to read it anytime.`
+            });
+            saveSessions();
+            renderChatMessages();
+            fetchStatus(); // Refresh documents list
+          } else {
+            alert(`Ingestion error: ${data.error}`);
+          }
+        } catch (err) {
+          alert(`Failed to add to library: ${err.message}`);
+        } finally {
+          // Reset attachments and toggle
+          state.attachedFile = null;
+          fileInput.value = "";
+          attachedFileRow.classList.remove("visible");
+          ingestToggle.checked = false;
+          messageInput.value = "";
+          messageInput.style.height = "auto";
+          sendBtn.disabled = false;
+        }
+        return;
+      }
+
+      // MODE 2: Socratic Inquiry (Regular Chat)
+      session.messages.push({ role: "user", text: text });
+      renderChatMessages();
+
+      messageInput.value = "";
+      messageInput.style.height = "auto";
+
+      // Show typing indicator with live progressive status
+      const typingDiv = document.createElement("div");
+      typingDiv.className = "message assistant";
+      typingDiv.id = "typingIndicator";
+      typingDiv.innerHTML = `
+        <div class="message-meta"><span>Wollyce</span></div>
+        <div class="bubble">
+          <div class="live-status">
+            <span class="pulse-dot"></span>
+            <span class="live-status-text">searching documentation...</span>
+          </div>
+        </div>
+      `;
+      chatContainer.appendChild(typingDiv);
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+
+      // Status visual pacing queue to guarantee each stage is seen and readable
+      const statusQueue = [];
+      let isQueueActive = false;
+      let streamFinished = false;
+      let finalDonePayload = null;
+      let finalErrorPayload = null;
+
+      function renderFinalAnswer() {
+        const indicator = document.getElementById("typingIndicator");
+        if (indicator) indicator.remove();
+
+        if (finalErrorPayload) {
+          session.messages.push({
+            role: "assistant",
+            text: `**Error:** ${finalErrorPayload}`
+          });
+          saveSessions();
+          renderChatMessages();
+        } else if (finalDonePayload) {
+          session.messages.push({
+            role: "assistant",
+            text: finalDonePayload.reply || "",
+            citations: finalDonePayload.citations || [],
+            abstained: Boolean(finalDonePayload.abstained)
+          });
+          saveSessions();
+          renderChatMessages();
+          fetchStatus();
+        }
+      }
+
+      function stepStatusQueue() {
+        if (statusQueue.length > 0) {
+          isQueueActive = true;
+          const nextMsg = statusQueue.shift();
+          const textEl = document.querySelector("#typingIndicator .live-status-text");
+          if (textEl) {
+            textEl.textContent = nextMsg;
+            chatScroll.scrollTop = chatScroll.scrollHeight;
+          }
+          setTimeout(stepStatusQueue, 750);
+        } else {
+          isQueueActive = false;
+          if (streamFinished) {
+            renderFinalAnswer();
+          }
+        }
+      }
+
+      function enqueueStatus(statusMsg) {
+        if (!statusMsg) return;
+        statusQueue.push(statusMsg);
+        if (!isQueueActive) {
+          stepStatusQueue();
+        }
+      }
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        let currentEvent = "";
+        let completed = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) {
+              currentEvent = "";
+              continue;
+            }
+            if (trimmed.startsWith("event:")) {
+              currentEvent = trimmed.slice(6).trim();
+            } else if (trimmed.startsWith("data:")) {
+              const dataStr = trimmed.slice(5).trim();
+              try {
+                const payload = JSON.parse(dataStr);
+                if (currentEvent === "status" || payload.type === "status") {
+                  if (payload.message) {
+                    enqueueStatus(payload.message);
+                  }
+                } else if (currentEvent === "done" || payload.type === "done") {
+                  completed = true;
+                  streamFinished = true;
+                  finalDonePayload = payload;
+                  if (!isQueueActive && statusQueue.length === 0) {
+                    renderFinalAnswer();
+                  }
+                } else if (currentEvent === "error" || payload.type === "error") {
+                  completed = true;
+                  streamFinished = true;
+                  finalErrorPayload = payload.error || "Unknown error";
+                  if (!isQueueActive && statusQueue.length === 0) {
+                    renderFinalAnswer();
+                  }
+                }
+              } catch (parseErr) {
+                console.warn("SSE parse error", parseErr, dataStr);
+              }
+            }
+          }
+        }
+
+        if (!completed) {
+          const indicator = document.getElementById("typingIndicator");
+          if (indicator) indicator.remove();
+        }
+      } catch (err) {
+        const indicator = document.getElementById("typingIndicator");
+        if (indicator) indicator.remove();
+        alert(`Connection error: ${err.message}`);
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    /* ==========================================================================
+       7. Document Reader & Knowledge Base Fetching
+       ========================================================================== */
+    function parseDocumentPages(rawContent) {
+      const pageRegex = /(?:<!--\s*page:\s*(\d+)\s*-->|<!,\s*page:\s*(\d+)\s*,\s*>|\[\[page:\s*(\d+)\]\]|\[page:\s*(\d+)\])/gi;
+      const matches = [...rawContent.matchAll(pageRegex)];
+
+      if (matches.length > 0) {
+        const pages = [];
+        const firstMatch = matches[0];
+        const preface = rawContent.slice(0, firstMatch.index).trim();
+
+        for (let i = 0; i < matches.length; i++) {
+          const m = matches[i];
+          const pageNum = parseInt(m[1] || m[2] || m[3] || m[4] || (i + 1), 10);
+          const start = m.index + m[0].length;
+          const end = (i + 1 < matches.length) ? matches[i + 1].index : rawContent.length;
+          let pageText = rawContent.slice(start, end).trim();
+          if (i === 0 && preface) {
+            pageText = preface + "\n\n" + pageText;
+          }
+          pages.push({ pageNum: pageNum, text: pageText });
+        }
+        return pages;
+      }
+
+      if (rawContent.includes("\x0c")) {
+        const rawPages = rawContent.split("\x0c");
+        const pages = [];
+        rawPages.forEach((txt, idx) => {
+          const trimmed = txt.trim();
+          if (trimmed || idx === 0) {
+            pages.push({ pageNum: pages.length + 1, text: trimmed });
+          }
+        });
+        if (pages.length > 0) return pages;
+      }
+
+      if (rawContent.length > 4000) {
+        const paragraphs = rawContent.split(/\n\s*\n/);
+        const pages = [];
+        let currentChunk = "";
+        paragraphs.forEach(para => {
+          if (currentChunk.length + para.length > 3500 && currentChunk.length > 0) {
+            pages.push({ pageNum: pages.length + 1, text: currentChunk.trim() });
+            currentChunk = para + "\n\n";
+          } else {
+            currentChunk += para + "\n\n";
+          }
+        });
+        if (currentChunk.trim()) {
+          pages.push({ pageNum: pages.length + 1, text: currentChunk.trim() });
+        }
+        if (pages.length > 0) return pages;
+      }
+
+      return [{ pageNum: 1, text: rawContent }];
+    }
+
+    function extractTableOfContents(pages) {
+      const toc = [];
+      const seen = new Set();
+
+      for (let i = 0; i < pages.length; i++) {
+        const text = pages[i].text;
+        let title = "";
+
+        const chap = text.match(/(?:^|\n)Chapter\s+(\d+)\s*(?:\r?\n\s*)+([A-Z][^\r\n]{2,80})/i);
+        if (chap) {
+          title = `Chapter ${chap[1]}: ${chap[2].trim()}`;
+        } else {
+          const mdMatch = text.match(/(?:^|\n)#{1,3}\s+([^\r\n]+)/);
+          if (mdMatch) {
+            title = mdMatch[1].trim();
+          } else {
+            const landmarkMatch = text.match(/(?:^|\n)(Introduction|Conclusion|Contents|Overview|Preface|Foreword)\b/i);
+            if (landmarkMatch) {
+              title = landmarkMatch[1].trim();
+            }
+          }
+        }
+
+        if (title && !seen.has(title.toLowerCase())) {
+          seen.add(title.toLowerCase());
+          toc.push({
+            title: title,
+            pageIndex: i,
+            pageNum: pages[i].pageNum || (i + 1)
+          });
+        }
+      }
+
+      if (toc.length <= 1 && pages.length > 20) {
+        const step = pages.length > 200 ? 50 : (pages.length > 50 ? 25 : 10);
+        for (let i = 0; i < pages.length; i += step) {
+          if (i > 0) {
+            toc.push({
+              title: `Page ${i + 1}`,
+              pageIndex: i,
+              pageNum: i + 1
+            });
+          }
+        }
+      }
+
+      return toc;
+    }
+
+    function renderTocDrawer() {
+      readerTocList.innerHTML = "";
+      readerTocCount.textContent = `${readerState.toc.length} sections`;
+
+      if (readerState.toc.length === 0) {
+        const li = document.createElement("li");
+        li.className = "toc-item mono";
+        li.style.color = "var(--ink-2)";
+        li.textContent = "No chapters detected";
+        readerTocList.appendChild(li);
+        return;
+      }
+
+      readerState.toc.forEach(item => {
+        const li = document.createElement("li");
+        li.className = "toc-item mono";
+        li.innerHTML = `
+          <span>${escapeHtml(item.title)}</span>
+          <span style="color: var(--plate-ink-2); font-size: 0.72rem;">p. ${item.pageNum}</span>
+        `;
+        li.addEventListener("click", () => {
+          goToPage(item.pageIndex);
+          readerTocPanel.style.display = "none";
+        });
+        readerTocList.appendChild(li);
+      });
+    }
+
+    function renderCurrentPage() {
+      if (!readerState.pages || readerState.pages.length === 0) {
+        readerDocContent.innerHTML = "<p><em>No content available.</em></p>";
+        readerPageInput.value = 1;
+        readerTotalPages.textContent = 1;
+        readerFooterPageLabel.textContent = "Page 1 of 1";
+        readerPrevBtn.disabled = true;
+        readerNextBtn.disabled = true;
+        readerFooterPrevBtn.disabled = true;
+        readerFooterNextBtn.disabled = true;
+        return;
+      }
+
+      if (readerState.currentPage < 0) readerState.currentPage = 0;
+      if (readerState.currentPage >= readerState.pages.length) {
+        readerState.currentPage = readerState.pages.length - 1;
+      }
+
+      const total = readerState.pages.length;
+      const current = readerState.currentPage;
+      const displayPageNum = current + 1;
+
+      readerPageInput.value = displayPageNum;
+      readerPageInput.max = total;
+      readerTotalPages.textContent = total;
+      readerFooterPageLabel.textContent = `Page ${displayPageNum} of ${total}`;
+
+      readerPrevBtn.disabled = (current <= 0);
+      readerNextBtn.disabled = (current >= total - 1);
+      readerFooterPrevBtn.disabled = (current <= 0);
+      readerFooterNextBtn.disabled = (current >= total - 1);
+
+      const page = readerState.pages[current];
+      let html = renderMarkdown(page.text);
+      if (current === 0 && readerState.keywordsHtml) {
+        html = readerState.keywordsHtml + html;
+      }
+
+      readerDocContent.innerHTML = html;
+      readerDocContent.scrollTop = 0;
+    }
+
+    function goToPage(index) {
+      if (isNaN(index)) return;
+      readerState.currentPage = Math.max(0, Math.min(index, readerState.pages.length - 1));
+      renderCurrentPage();
+    }
+
+    function nextPage() {
+      if (readerState.currentPage < readerState.pages.length - 1) {
+        readerState.currentPage += 1;
+        renderCurrentPage();
+      }
+    }
+
+    function prevPage() {
+      if (readerState.currentPage > 0) {
+        readerState.currentPage -= 1;
+        renderCurrentPage();
+      }
+    }
+
+    async function openDocumentInReader(filename) {
+      try {
+        const res = await fetch(`/api/document?name=${encodeURIComponent(filename)}`);
+        const data = await res.json();
+
+        if (!data.ok) {
+          alert(`Could not load document: ${data.error}`);
+          return;
+        }
+
+        readerDocTitle.textContent = data.name;
+
+        // Extract and collapse the Ulpia index search terms so the human reader sees clean book prose
+        let rawContent = data.content;
+        let searchForHtml = "";
+        const searchMatch = rawContent.match(/\*\*Search for:\*\*([^\n]+)/i);
+        if (searchMatch) {
+          const terms = searchMatch[1].trim();
+          const termCount = terms.split(",").length;
+          searchForHtml = `
+            <details style="margin-bottom: 1.25rem; font-size: 0.78rem; border: 1px solid var(--plate-border); padding: 0.5rem 0.75rem; background: var(--ground);">
+              <summary class="mono" style="cursor: pointer; color: var(--plate-ink-2); user-select: none;">
+                Index Keywords (${termCount} terms)
+              </summary>
+              <div class="mono" style="margin-top: 0.5rem; color: var(--ink-2); line-height: 1.5;">${escapeHtml(terms)}</div>
+            </details>
+          `;
+          rawContent = rawContent.replace(/\*\*Search for:\*\*([^\n]+)\n*/i, "");
+        }
+
+        const pages = parseDocumentPages(rawContent);
+        const toc = extractTableOfContents(pages);
+
+        readerState.docName = data.name;
+        readerState.pages = pages;
+        readerState.currentPage = 0;
+        readerState.toc = toc;
+        readerState.keywordsHtml = searchForHtml;
+
+        renderTocDrawer();
+        renderCurrentPage();
+        docReader.classList.add("open");
+      } catch (err) {
+        alert(`Error opening document: ${err.message}`);
+      }
+    }
+
+    function renderDocumentsList() {
+      docsList.innerHTML = "";
+      docsCount.textContent = state.documents.length;
+
+      state.documents.forEach(docName => {
+        const li = document.createElement("li");
+        li.className = "item-row";
+        li.innerHTML = `
+          <span class="item-name mono" title="${escapeHtml(docName)}">${escapeHtml(docName)}</span>
+          <button class="doc-action-btn" title="Cite in chat">+</button>
+        `;
+
+        // Clicking row opens reader
+        li.querySelector(".item-name").addEventListener("click", () => {
+          openDocumentInReader(docName);
+        });
+
+        // Clicking '+' inserts citation in message input
+        li.querySelector(".doc-action-btn").addEventListener("click", (e) => {
+          e.stopPropagation();
+          messageInput.value += ` @${docName} `;
+          messageInput.focus();
+        });
+
+        docsList.appendChild(li);
+      });
+    }
+
+    /* ==========================================================================
+       8. Telemetry & Status Sync
+       ========================================================================== */
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/status");
+        const data = await res.json();
+
+        headerModel.textContent = data.model || "Gemini 3.1 Flash Lite";
+        state.documents = data.indexed_files || [];
+        renderDocumentsList();
+
+        if (data.metering) {
+          const m = data.metering;
+          const pct = (m.percentage_used || 0).toFixed(1);
+          headerUsage.textContent = `${(m.total_tokens || 0).toLocaleString()} / ${(m.monthly_token_cap || 2000000).toLocaleString()}`;
+          headerCost.textContent = `$${(m.total_cost_usd || 0).toFixed(4)}`;
+
+          modalTokenPercent.textContent = `${pct}% used`;
+          modalProgressFill.style.width = `${Math.min(pct, 100)}%`;
+          modalTotalTokens.textContent = (m.total_tokens || 0).toLocaleString();
+          modalTotalCost.textContent = `$${(m.total_cost_usd || 0).toFixed(4)}`;
+          modalPromptTokens.textContent = (m.total_prompt_tokens || 0).toLocaleString();
+          modalCompletionTokens.textContent = (m.total_completion_tokens || 0).toLocaleString();
+        }
+      } catch (err) {
+        console.warn("Telemetry status sync error:", err);
+      }
+    }
+
+    /* ==========================================================================
+       9. Initialization
+       ========================================================================== */
+    if (state.sessions.length === 0) {
+      createNewSession();
+    } else {
+      state.currentSessionId = state.sessions[0].id;
+      renderSessionsList();
+      renderChatMessages();
+    }
+
+    fetchStatus();
+  </script>
+</body>
+</html>

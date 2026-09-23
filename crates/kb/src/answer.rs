@@ -1,0 +1,628 @@
+//! The answering surface: a model reads what retrieval found, and only that.
+//!
+//! ## Where this sits, and where it deliberately does not
+//!
+//! ADR-0018 keeps models out of the retrieval path, and this module does not touch that
+//! line: retrieval runs first, deterministic, and produces its ranked passages and its
+//! verdict. What this adds is the step AFTER the verdict, for callers who want prose
+//! instead of a reading list: a model receives the question, the passages, and the
+//! gate's own evidence, and writes an answer grounded in them. Same process contract as
+//! the classifier and the promoters (ADR-0027): a command from the manifest, prompt on
+//! stdin, text on stdout, and when the command is absent or fails the caller gets the
+//! reading list it would have gotten anyway. The fleet never stops answering because a
+//! model was missing.
+//!
+//! ## The refusal carries through, which is the whole point
+//!
+//! The abstention benchmark measured the deterministic layer refusing 28 of 30
+//! out-of-scope questions. An answering surface that papered over that with fluent
+//! prose would spend the system's one differentiating property. So: a `Nothing` verdict
+//! never reaches the model at all, and the prompt orders the model to say plainly when
+//! the passages do not hold the answer, with the evidence line in front of it so a low
+//! score arrives labelled. The instruction is not a vibe, it is what makes LongMemEval's
+//! abstention split measurable end to end.
+
+use crate::memory::{Answer, Confidence, Verdict};
+use crate::retrieve::Retrieved;
+
+/// The three table sizes, because one default lied by omission on aggregation.
+///
+/// LongMemEval's multi-session split measured it: with the answer surface reading five
+/// files, questions whose answer is crumbs across a dozen sessions scored 18 percent,
+/// not because retrieval ranked wrong files but because most of the right ones never
+/// reached the table. A personal fleet's common question has one owner and wants the
+/// small fast table; an aggregation question wants a bigger one, and an exhaustive one
+/// wants the whole base read. Three modes, chosen by the caller, never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The default: top files, one model call. The librarian's answer.
+    Fast,
+    /// The bigger table: up to twelve files, one call. For questions whose evidence
+    /// spreads across several files but still fits one reading.
+    Expanded,
+    /// Every file in the base, read in batches (map), then composed (reduce). The
+    /// detective's answer, and the caller is warned it costs one model call per batch
+    /// plus one, with the estimate printed before anything runs.
+    Complete,
+}
+
+impl Mode {
+    pub fn files(self) -> usize {
+        match self {
+            Mode::Fast => 5,
+            Mode::Expanded => 12,
+            Mode::Complete => usize::MAX,
+        }
+    }
+
+    /// How many of a file's ranked passages reach the prompt.
+    ///
+    /// **This was the constant 2, and it silently dropped correct answers.** Measured on
+    /// 2026-09-05 against a base built by ingesting one academic PDF: asked "quais os
+    /// tipos de inovacao", the answer surface replied that the library held no taxonomy,
+    /// while the file it had ranked first carried a section headed "The four kinds".
+    /// Retrieval had returned four passages from that file and ranked the right one
+    /// fourth, so the prompt never saw it. `--expanded` failed identically, because
+    /// [`Mode::files`] widens the table sideways and nothing widened it downward.
+    ///
+    /// So the two axes are separate and both belong to the mode. Files decide how many
+    /// documents answer; passages decide how much of each document is read. A cap on the
+    /// second is not an opinion about relevance, it is the only thing bounding prompt
+    /// size once a note is long, and one note in this fleet has a hundred sections.
+    ///
+    /// The numbers come from the section counts of the 145 knowledge notes on disk,
+    /// counted the same day: median 7, p90 15, max 100. `Fast` reads the median note
+    /// whole, `Expanded` reads the p90 note whole, and `Complete` goes deeper again
+    /// while staying bounded, because [`BATCH`] caps files per call and nothing else
+    /// caps sections per file.
+    pub fn passages(self) -> usize {
+        match self {
+            Mode::Fast => 8,
+            Mode::Expanded => 16,
+            Mode::Complete => 32,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Fast => "fast",
+            Mode::Expanded => "expanded",
+            Mode::Complete => "complete",
+        }
+    }
+}
+
+/// Files per map batch in complete mode. Sized so a batch of chunked notes stays well
+/// inside any model's context with room to answer; the estimate the caller prints is
+/// derived from this.
+pub const BATCH: usize = 10;
+
+/// Maximum characters allowed for a single section window in prompt assembly.
+/// Keeps individual sections bounded while allowing complete paragraph context (~450 tokens).
+pub const MAX_SECTION_WINDOW: usize = 1800;
+
+/// Merges and bounds passages belonging to the same file.
+/// When chunks share a heading path, their text is consolidated by merging overlaps
+/// so the reader model receives a continuous section window rather than fragmented,
+/// duplicated chunks (Small-to-Big context assembly).
+pub fn assemble_passages(
+    passages: &[crate::retrieve::Passage],
+    max_passages: usize,
+) -> Vec<crate::retrieve::Passage> {
+    let mut out: Vec<crate::retrieve::Passage> = Vec::new();
+
+    for p in passages.iter().take(max_passages) {
+        if let Some(existing) = out.iter_mut().find(|e| {
+            e.heading_path == p.heading_path && e.captured_from == p.captured_from
+        }) {
+            existing.text = merge_chunk_text(&existing.text, &p.text);
+        } else {
+            out.push(p.clone());
+        }
+    }
+
+    for p in &mut out {
+        if p.text.len() > MAX_SECTION_WINDOW {
+            p.text = cap_window_cleanly(&p.text, MAX_SECTION_WINDOW);
+        }
+    }
+
+    out
+}
+
+/// Merges two text chunks from the same section, detecting and eliminating overlap.
+fn merge_chunk_text(first: &str, second: &str) -> String {
+    let first = first.trim();
+    let second = second.trim();
+
+    if first.contains(second) {
+        return first.to_string();
+    }
+    if second.contains(first) {
+        return second.to_string();
+    }
+
+    // Check for overlap: find the largest suffix of first that is a prefix of second.
+    let min_len = 10;
+    let max_overlap = first.len().min(second.len());
+    let mut overlap_size = 0;
+
+    for len in (min_len..=max_overlap).rev() {
+        if first.ends_with(&second[..len]) {
+            overlap_size = len;
+            break;
+        }
+    }
+
+    if overlap_size > 0 {
+        format!("{}\n{}", first, &second[overlap_size..].trim_start())
+    } else {
+        format!("{}\n\n{}", first, second)
+    }
+}
+
+/// Truncates an oversized section window cleanly at a paragraph or sentence boundary.
+fn cap_window_cleanly(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let slice = &text[..max_len];
+    if let Some(pos) = slice.rfind("\n\n") {
+        if pos > max_len / 2 {
+            return slice[..pos].trim().to_string();
+        }
+    }
+    if let Some(pos) = slice.rfind(". ") {
+        if pos > max_len / 2 {
+            return format!("{}.", slice[..pos].trim());
+        }
+    }
+    slice.trim().to_string()
+}
+
+/// The prompt, assembled from retrieval's output and nothing else.
+///
+/// The model is told what the librarian knows: which files answered, how confidently,
+/// and what the pages actually say. It is not given the fleet, the question's history,
+/// or a license to know things; the grounding rule is stated as a hard instruction and
+/// the caller prints the sources itself, so a fabricated citation has nowhere to hide.
+pub fn prompt(question: &str, answer: &Answer, mode: Mode) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "You answer ONE question from a personal knowledge library, using ONLY the \
+         passages below. Hard rules:\n\
+         - Every claim in your answer must be supported by a passage. No outside \
+           knowledge, no filling gaps, however obvious the gap.\n\
+         - If the passages do not hold the answer, or hold only part of it, say so \
+           plainly and say what is missing. \"The library does not hold this\" is a \
+           correct and complete answer.\n\
+         - Cite the file path after the claim it supports, in parentheses.\n\
+         - A passage marked SHORT MEMORY is recent and nobody has judged or distilled \
+           it yet. You may use it. If you do, say that the claim comes from short \
+           memory, so the reader knows it is fresh rather than settled.\n\
+         - A passage marked \"captured from\" names the document the note was distilled \
+           from. When the question asks where something comes from, that is the answer, \
+           and it is a fact the library does hold.\n\
+         - Answer in the language the question was asked in. Be brief: the reader \
+           asked a question, not for a report.\n\n",
+    );
+
+    out.push_str(&format!(
+        "WHAT RETRIEVAL THINKS. Top keyword score {:.1} against a floor of {:.1}; \
+         verdict: {}. Below the floor, treat every passage as a lead, not an answer.\n\n",
+        answer.confidence.keyword_score,
+        answer.confidence.floor,
+        match answer.confidence.verdict {
+            Verdict::Hit => "something here matches",
+            Verdict::Guess => "a guess; the match may be a coincidence of vocabulary",
+            Verdict::Nothing => "nothing matched",
+        }
+    ));
+
+    out.push_str("THE PASSAGES:\n");
+    for f in answer.found.iter().take(mode.files()) {
+        // The label rides on every passage header rather than once per file, because
+        // a model reading passage four does not reliably remember what was said above
+        // passage one.
+        let layer = match f.layer {
+            crate::retrieve::Layer::Short => " [SHORT MEMORY: recent, not distilled]",
+            crate::retrieve::Layer::Long => "",
+        };
+        let assembled = assemble_passages(&f.passages, mode.passages());
+        for p in assembled {
+            // The document the note was distilled from, when the note records one. Asked
+            // "which document does this come from, who wrote it, what year", a base whose
+            // notes all carried that in front matter answered that it did not record such
+            // a thing, because front matter is not chunked and nothing else carried it.
+            // The passage header is where the reader is already looking.
+            let origin = match &p.captured_from {
+                Some(src) if !src.is_empty() => format!(" [captured from {src}]"),
+                _ => String::new(),
+            };
+            out.push_str(&format!(
+                "\n--- {}/{} ({}){}{}\n{}\n",
+                f.base,
+                f.path,
+                if p.heading_path.is_empty() { "top" } else { &p.heading_path },
+                layer,
+                origin,
+                p.text.trim()
+            ));
+        }
+        if f.passages.is_empty() && !f.purpose.is_empty() {
+            // A keyword-only hit carries no chunk; its purpose line is still evidence
+            // of what the file is for, and the model should ask for the file rather
+            // than invent its contents.
+            out.push_str(&format!(
+                "\n--- {}/{} (no passage retrieved; the file exists to: {})\n",
+                f.base, f.path, f.purpose
+            ));
+        }
+    }
+
+    out.push_str(&format!("\nTHE QUESTION:\n{}\n", question.replace('\n', " ")));
+    out
+}
+
+/// The line every caller prints under a model answer, so the citations can be checked
+/// against what retrieval actually served rather than taken on the model's word.
+pub fn sources_line(answer: &Answer, mode: Mode) -> String {
+    let mut out = String::from("sources served:");
+    for f in answer.found.iter().take(mode.files()) {
+        out.push_str(&format!(" {}/{}", f.base, f.path));
+    }
+    out
+}
+
+/// Whether the question should reach a model at all.
+///
+/// `Nothing` short-circuits: there are no passages to ground an answer in, and sending
+/// a model to answer from nothing is how fluent fabrication happens. The caller prints
+/// the same refusal `kb route` prints, with the suggestion list, and spends zero model
+/// calls doing it.
+pub fn worth_asking(confidence: &Confidence, found: &[Retrieved]) -> bool {
+    confidence.verdict != Verdict::Nothing && !found.is_empty()
+}
+
+/// Complete mode: the whole base, read for real.
+///
+/// Two stages. **Map**: every markdown file the fleet serves, in batches of [`BATCH`],
+/// each batch handed to the model with one job: list the facts relevant to the
+/// question, one line each, citing the file after each fact, or the word NONE. The
+/// question travels with every batch, so relevance is judged against it, not guessed.
+/// **Reduce**: the surviving fact lines, composed into an answer under the same
+/// grounding rules as every other mode. Facts arrive pre-cited, so the reduce step
+/// inherits its citations instead of inventing them.
+///
+/// This is the aggregation answer the fast table cannot give: "how many times did X
+/// happen" is crumbs across many files, and a top-k table starves it by construction.
+pub struct CompletePlan {
+    pub files: Vec<(String, std::path::PathBuf)>,
+    pub batches: usize,
+}
+
+/// What complete mode is about to cost, computed before anything runs, so every
+/// surface can warn: the UI puts it on screen, and a CLI or MCP caller gets it as the
+/// first line of output, because the model reading that output deserves the same
+/// warning a person gets.
+pub fn complete_plan(memory: &crate::memory::Memory) -> CompletePlan {
+    let mut files = Vec::new();
+    for agent in &memory.agents {
+        if let Ok(base) = crate::base::Base::discover(&agent.root, true) {
+            for f in &base.files {
+                let (keys, _) = crate::index::header_of(&f.text);
+                if !keys.is_empty() {
+                    files.push((format!("{}/{}", agent.name, f.rel), agent.root.join(&f.rel)));
+                }
+            }
+        }
+    }
+    let batches = files.len().div_ceil(BATCH);
+    CompletePlan { files, batches }
+}
+
+/// One map batch's prompt.
+pub fn map_prompt(question: &str, batch: &[(String, String)]) -> String {
+    // **A batch-level NONE is no longer a legal answer, and that rule bought 91
+    // percent of the diagnosed failures.** The traced autopsy of 2026-08-25 found
+    // twenty of twenty-two multi-session misses were a map batch replying NONE while
+    // one of its files plainly held the evidence: the model skimmed the batch and
+    // answered for it as a whole. Forcing a verdict per file makes skipping a file a
+    // visible act instead of a silent one. The relevance criterion stays generic,
+    // "relevant to the question as asked", never a benchmark's category list.
+    let mut out = String::from(
+        "Extract facts relevant to ONE question from the files below. Hard rules:\n\
+         - For EVERY file listed, output a verdict line: `FILE <path>: facts below` or \
+           `FILE <path>: no relevant mention`. Every file, no exceptions; answering for \
+           the batch as a whole is not a legal output.\n\
+         - Under a `facts below` verdict, one fact per line, as a bullet starting with \
+           `- `, and after each fact, in parentheses: the file path and the session \
+           date, like `- fact (history/memory/003-2023-05-20.md, 2023-05-20)`.\n\
+         - Only what the files literally state. No inference across files, no outside \
+           knowledge.\n\n",
+    );
+    // **The second door, filtered by the same rule as the first.** Every other prompt here
+    // is built from passages, and `store::chunk` has always dropped keyword lines before a
+    // chunk is stored, for the independence reason: the keyword scorer and the text scorer
+    // must not read the same words. Complete mode is the one path that bypasses chunking and
+    // reads the file off disk, so it was the one path that shipped keyword lines to a model.
+    //
+    // Measured on this fleet 2026-09-07, over the 330 files `complete_plan` selects: 3,641,773
+    // bytes read from disk, of which 310,215 are keyword lines and their wrapped
+    // continuations, 8.5%, about 77,500 tokens per full read across 33 batches.
+    //
+    // The filter is here rather than at the caller's `read_to_string` because this function is
+    // where a file becomes a prompt, which is the same seam `blocks::assemble` occupies, and
+    // it is the definition `index::labelled` owns rather than a fourth copy of it.
+    for (name, text) in batch {
+        let text = crate::blocks::strip_keyword_lines(text);
+        out.push_str(&format!("--- {name}\n{text}\n\n"));
+    }
+    out.push_str(&format!("THE QUESTION:\n{question}\n"));
+    out
+}
+
+/// The reduce prompt over the collected fact lines.
+pub fn reduce_prompt(question: &str, facts: &str) -> String {
+    // **Enumerate, then commit.** The autopsy's one true composition failure computed
+    // the right answer and then declined to state it; the scaffold makes the committed
+    // line mandatory and pushes hedging after it. Refusal stays a legal commitment:
+    // "the library does not hold this" fixes refusing-despite-having, never
+    // refusing-for-lack.
+    format!(
+        "Answer ONE question using ONLY the fact lines below, each carrying its source \
+         file and session date in parentheses. Work in this exact order:\n\
+         1. CANDIDATES: list every fact that bears on the question, one per line, with \
+            its source and date, marked `counted` or `excluded (reason)`.\n\
+         2. ANSWER: one line starting with `ANSWER:` containing your committed answer. \
+            When the question asks for a number, the line contains the number. When the \
+            facts do not hold the answer, the line is `ANSWER: the library does not \
+            hold this`. This line is mandatory and comes before any caveat.\n\
+         3. After the ANSWER line only: any caveat worth stating, briefly.\n\
+         Aggregate honestly: count and list from the facts, and say if the facts look \
+         incomplete. Answer in the language of the question.\n\n\
+         THE FACTS:\n{facts}\n\nTHE QUESTION:\n{question}\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::AgentChoice;
+
+    fn answer_with(found: Vec<Retrieved>, verdict: Verdict, score: f32) -> Answer {
+        let _: Option<AgentChoice> = None;
+        Answer {
+            found,
+            confidence: Confidence { verdict, agreement: 1, keyword_score: score, margin: 1.0, floor: crate::memory::SCORE_FLOOR },
+            agent: None,
+            keyword_top: None,
+        }
+    }
+
+    fn hit(base: &str, path: &str, text: &str) -> Retrieved {
+        Retrieved {
+            base: base.into(),
+            path: path.into(),
+            layer: crate::retrieve::layer_of(path),
+            title: String::new(),
+            purpose: String::new(),
+            score: 1.0,
+            keyword_score: 20.0,
+            why: vec!["keywords #1".into()],
+            matched: vec![],
+            passages: vec![crate::retrieve::Passage {
+                captured_from: None,
+                heading_path: "H".into(),
+                text: text.into(),
+                excerpt: String::new(),
+                provenance: None,
+                stage: None,
+            }],
+        }
+    }
+
+
+    #[test]
+    fn the_map_stage_demands_a_verdict_per_file_and_dated_facts() {
+        // The 2026-08-25 autopsy: 20 of 22 failures were a batch-level NONE swallowing
+        // a file that held the evidence. The contract now forbids that shape.
+        let p = map_prompt(
+            "quantas vezes fui ao medico",
+            &[("history/memory/001.md".into(), "fui ao medico em marco".into())],
+        );
+        assert!(p.contains("THE QUESTION"));
+        assert!(p.contains("history/memory/001.md"));
+        assert!(p.contains("For EVERY file listed"), "the per-file verdict is the rule");
+        assert!(p.contains("no relevant mention"), "skipping a file is a visible act");
+        assert!(p.contains("the session \\\n           date") || p.contains("session date") || p.contains("session \
+           date"), "dates survive into fact lines");
+    }
+
+    /// **The one path that reads a file instead of a chunk, and therefore the one path that
+    /// shipped keyword lines to a model.** Every other prompt here is built from passages,
+    /// and `store::chunk` drops those lines before a chunk is stored. Complete mode reads
+    /// whole files off disk, so the filter has to be applied where the file becomes a prompt.
+    ///
+    /// The prose of the note has to survive intact, which is the half worth pinning: a filter
+    /// that over-removes takes a fact out of the only stage that reads every file.
+    #[test]
+    fn a_whole_file_batch_arrives_without_its_keyword_lines() {
+        let file = "# Protein
+
+**Search for:** `proteina`, `protein`, `g per kg`,
+                    `grama por quilo`
+
+**Exists to:** state the daily floor
+
+                    The floor is 1.6 g per kg, and the line above ends on a comma,
+                    which must not take this sentence with it.
+";
+        let p = map_prompt("quanta proteina", &[("yaron/knowledge/protein.md".into(), file.into())]);
+
+        assert!(!p.contains("Search for:"), "the declaration goes: {p}");
+        assert!(!p.contains("grama por quilo"), "and its wrapped continuation with it: {p}");
+        assert!(p.contains("The floor is 1.6 g per kg"), "the fact survives: {p}");
+        assert!(
+            p.contains("which must not take this sentence with it"),
+            "a prose line after one ending on a comma survives: {p}"
+        );
+        assert!(p.contains("**Exists to:** state the daily floor"), "the summary is not a key line");
+    }
+
+    #[test]
+    fn the_reduce_stage_commits_before_it_hedges() {
+        let p = reduce_prompt("how many visits", "- visited in march (a.md, 2023-03-01)");
+        assert!(p.contains("ANSWER:"), "the committed line is mandatory");
+        assert!(p.contains("before any caveat"), "hedging comes after the commitment");
+        assert!(p.contains("the library does not"), "refusal stays a legal commitment");
+        assert!(p.contains("say if the facts look incomplete"));
+    }
+
+    /// The regression that produced this method. A file whose answer sits in its fourth
+    /// ranked passage used to reach the model with two, and the model then correctly
+    /// reported that the library did not hold what was in fact on disk. Measured on a
+    /// real base on 2026-09-05, on the question "quais os tipos de inovacao".
+    ///
+    /// The second half matters as much: the cap still exists, so a note with a hundred
+    /// sections cannot spend the whole prompt on itself.
+    #[test]
+    fn a_late_ranked_passage_still_reaches_the_model_and_the_cap_still_holds() {
+        let mut f = hit("zed", "knowledge/inovacao.md", "first");
+        f.passages = (1..=40)
+            .map(|i| crate::retrieve::Passage {
+                captured_from: None,
+                heading_path: format!("section {i}"),
+                text: format!("passage number {i}"),
+                excerpt: String::new(),
+                provenance: None,
+                stage: None,
+            })
+            .collect();
+        let a = answer_with(vec![f], Verdict::Hit, 30.0);
+
+        let fast = prompt("quais os tipos de inovacao", &a, Mode::Fast);
+        assert!(fast.contains("passage number 4"), "the passage the old constant 2 dropped");
+        assert!(fast.contains("passage number 8"), "fast reads the median note whole");
+        assert!(!fast.contains("passage number 9"), "and stops there");
+
+        let expanded = prompt("quais os tipos de inovacao", &a, Mode::Expanded);
+        assert!(expanded.contains("passage number 16"), "expanded reads the p90 note whole");
+        assert!(!expanded.contains("passage number 17"));
+
+        let complete = prompt("quais os tipos de inovacao", &a, Mode::Complete);
+        assert!(complete.contains("passage number 32"));
+        assert!(!complete.contains("passage number 33"), "even complete is bounded per file");
+    }
+
+    #[test]
+    fn the_refusal_instruction_is_in_every_prompt() {
+        // The abstention property must survive the answering surface, and it survives
+        // as an instruction the model cannot miss plus a verdict line in front of it.
+        let a = answer_with(vec![hit("zed", "knowledge/x.md", "body")], Verdict::Guess, 9.0);
+        let p = prompt("qualquer coisa", &a, Mode::Fast);
+        assert!(p.contains("The library does not hold this"));
+        assert!(p.contains("a guess; the match may be a coincidence"));
+        assert!(p.contains("treat every passage as a lead"));
+    }
+
+    /// The short memory reaches the model with its label on and a rule about it, so
+    /// the decision to lean on a fresh, unjudged fact is the model's and is conscious.
+    /// The library passage in the same prompt carries no label, because the absence
+    /// is the signal for the settled half.
+    #[test]
+    fn a_short_memory_passage_is_labelled_and_the_rule_for_it_is_in_the_prompt() {
+        let a = answer_with(
+            vec![
+                hit("zed", "inbox/dropped.md", "the vendor changed the price yesterday"),
+                hit("zed", "knowledge/pricing.md", "the price is set quarterly"),
+            ],
+            Verdict::Hit,
+            30.0,
+        );
+        let p = prompt("what is the price", &a, Mode::Fast);
+        assert!(p.contains("inbox/dropped.md (H) [SHORT MEMORY: recent, not distilled]"), "{p}");
+        assert!(p.contains("knowledge/pricing.md (H)\n"), "the library passage is unlabelled: {p}");
+        assert!(p.contains("say that the claim comes from short memory"), "{p}");
+    }
+
+    #[test]
+    fn nothing_never_reaches_a_model() {
+        let a = answer_with(vec![], Verdict::Nothing, 0.0);
+        assert!(!worth_asking(&a.confidence, &a.found), "no passages, no model call");
+    }
+
+    #[test]
+    fn the_prompt_carries_only_what_retrieval_served() {
+        let a = answer_with(
+            vec![hit("yaron", "knowledge/protein-basics.md", "1.6 to 2.2 g per kg")],
+            Verdict::Hit,
+            60.0,
+        );
+        let p = prompt("how much protein", &a, Mode::Fast);
+        assert!(p.contains("yaron/knowledge/protein-basics.md"));
+        assert!(p.contains("1.6 to 2.2 g per kg"));
+        assert!(
+            sources_line(&a, Mode::Fast).contains("yaron/knowledge/protein-basics.md"),
+            "the caller can check citations against what was served"
+        );
+    }
+
+    #[test]
+    fn test_small_to_big_section_window_merges_contiguous_chunks() {
+        let mut h = hit("zed", "knowledge/allocator.md", "chunk 1");
+        h.passages = vec![
+            crate::retrieve::Passage {
+                captured_from: None,
+                heading_path: "Memory > Allocator".into(),
+                text: "Part 1: Linux buddy allocator. Page tables manage 4KB frames.".into(),
+                excerpt: String::new(),
+                provenance: None,
+                stage: None,
+            },
+            crate::retrieve::Passage {
+                captured_from: None,
+                heading_path: "Memory > Allocator".into(),
+                text: "Page tables manage 4KB frames. Part 2: Slab cache handles smaller objects.".into(),
+                excerpt: String::new(),
+                provenance: None,
+                stage: None,
+            },
+        ];
+        let a = answer_with(vec![h], Verdict::Hit, 30.0);
+        let p = prompt("como funciona o alocador", &a, Mode::Fast);
+
+        // Should only have one section header for Memory > Allocator, not two
+        let occurrences = p.matches("--- zed/knowledge/allocator.md (Memory > Allocator)").count();
+        assert_eq!(occurrences, 1, "contiguous chunks under same heading should merge: {p}");
+
+        // Overlap should be merged without repetition
+        let overlap_count = p.matches("Page tables manage 4KB frames.").count();
+        assert_eq!(overlap_count, 1, "overlapping sentence should not repeat: {p}");
+
+        // Both parts should be present
+        assert!(p.contains("Part 1: Linux buddy allocator."));
+        assert!(p.contains("Part 2: Slab cache handles smaller objects."));
+    }
+
+    #[test]
+    fn test_small_to_big_section_window_caps_oversized_section() {
+        let para = "This is a detailed paragraph explaining runtime semantics and safety invariants.\n\n";
+        let large_text = para.repeat(50); // ~4000 characters
+        let mut h = hit("zed", "knowledge/large.md", "chunk 1");
+        h.passages = vec![crate::retrieve::Passage {
+            captured_from: None,
+            heading_path: "Large > Section".into(),
+            text: large_text,
+            excerpt: String::new(),
+            provenance: None,
+            stage: None,
+        }];
+        let a = answer_with(vec![h], Verdict::Hit, 30.0);
+        let p = prompt("query", &a, Mode::Fast);
+
+        // Check that prompt is bounded and does not flood context
+        assert!(p.len() < 3500, "oversized section window should be bounded: length {}", p.len());
+        assert!(p.contains("Large > Section"));
+    }
+}
+
