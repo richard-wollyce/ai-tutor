@@ -1,0 +1,4 @@
+# Manifesto de Agentes e Classificador do Wollyce AI Tutor (Ulpia)
+agent = wollyce:agent.txt
+# Para ativar classificador residente HTTP (ex: llama-server, Ollama):
+# classifier = http://127.0.0.1:4115

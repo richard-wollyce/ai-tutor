@@ -68,7 +68,7 @@ fn main() {
 /// Detecta chaves de API disponíveis no ambiente ou chaveiro do SO.
 fn resolve_provider_and_key() -> (String, String, String) {
     if let Some(key) = model_call::keys::get("gemini") {
-        return ("gemini".into(), "gemini-3.1-flash-lite".into(), key);
+        return ("gemini".into(), "gemini-2.5-flash".into(), key);
     }
     if let Some(key) = model_call::keys::get("anthropic") {
         return ("anthropic".into(), "claude-3-5-haiku-20241022".into(), key);
@@ -76,5 +76,5 @@ fn resolve_provider_and_key() -> (String, String, String) {
     if let Some(key) = model_call::keys::get("openai") {
         return ("openai".into(), "gpt-4o-mini".into(), key);
     }
-    ("gemini".into(), "gemini-3.1-flash-lite".into(), String::new())
+    ("gemini".into(), "gemini-2.5-flash".into(), String::new())
 }

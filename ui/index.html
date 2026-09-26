@@ -2111,10 +2111,27 @@
             `;
           }
 
+          let scopeBadge = "";
+          if (msg.abstained || msg.coverage === "uncovered") {
+            scopeBadge = '<span style="color: var(--accent); font-weight: 500;">• Outside Notes</span>';
+          } else if (msg.coverage === "adjacent") {
+            scopeBadge = '<span style="color: var(--ink-2);">• Adjacent Knowledge (Guess)</span>';
+          } else if (msg.coverage === "covered") {
+            const scoreTxt = msg.confidence?.keyword_score ? ` (${Number(msg.confidence.keyword_score).toFixed(1)})` : '';
+            scopeBadge = `<span style="color: var(--gold); font-weight: 500;">• Verified in Notes${scoreTxt}</span>`;
+          }
+
+          let methodBadge = "";
+          if (msg.methodology && msg.methodology.name) {
+            const bookAttr = msg.methodology.book ? ` title="${escapeHtml(msg.methodology.book)}"` : '';
+            methodBadge = `<span class="mono" style="opacity: 0.85; font-size: 0.85em;"${bookAttr}>• ${escapeHtml(msg.methodology.name)}</span>`;
+          }
+
           msgDiv.innerHTML = `
             <div class="message-meta">
               <span>Wollyce</span>
-              ${msg.abstained ? '<span style="color: var(--accent);">• Outside Uploaded Material</span>' : ''}
+              ${scopeBadge}
+              ${methodBadge}
             </div>
             <div class="bubble markdown-body">${renderMarkdown(msg.text)}</div>
             ${citationsHtml}
@@ -2279,7 +2296,10 @@
             role: "assistant",
             text: finalDonePayload.reply || "",
             citations: finalDonePayload.citations || [],
-            abstained: Boolean(finalDonePayload.abstained)
+            abstained: Boolean(finalDonePayload.abstained),
+            coverage: finalDonePayload.coverage || (finalDonePayload.abstained ? "uncovered" : "covered"),
+            methodology: finalDonePayload.methodology || null,
+            confidence: finalDonePayload.confidence || null
           });
           saveSessions();
           renderChatMessages();

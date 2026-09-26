@@ -30,6 +30,18 @@ ends = Wollyce para onde a pergunta não é sobre os materiais de estudo do alun
         fs::write(&agent_txt, agent_content).map_err(|e| e.to_string())?;
     }
 
+    // 2. fleet.txt (Manifesto do Ulpia para descoberta do agente e classificador)
+    let fleet_txt = base_root.join("fleet.txt");
+    if !fleet_txt.exists() {
+        let fleet_content = "\
+# Manifesto de Agentes e Classificador do Wollyce AI Tutor (Ulpia)
+agent = wollyce:agent.txt
+# Para ativar classificador residente HTTP (ex: llama-server, Ollama):
+# classifier = http://127.0.0.1:4115
+";
+        fs::write(&fleet_txt, fleet_content).map_err(|e| e.to_string())?;
+    }
+
     // 2. MAP.md
     let map_md = base_root.join("MAP.md");
     if !map_md.exists() {
@@ -42,17 +54,18 @@ ends = Wollyce para onde a pergunta não é sobre os materiais de estudo do alun
 
 ## Materiais Ingeridos
 - [[trivium-fundamentos]]: Fundamentos do Trivium e as Artes Liberais
+- [[quadrivium-fundamentos]]: O Quadrivium e as Ciências Matemáticas
 ";
         fs::write(&map_md, map_content).map_err(|e| e.to_string())?;
     }
 
-    // 3. Documento inicial de amostra (Trivium)
-    let sample_file = knowledge_dir.join("trivium-fundamentos.md");
-    if !sample_file.exists() {
+    // 3. Documentos iniciais de amostra (Trivium e Quadrivium)
+    let sample_file_1 = knowledge_dir.join("trivium-fundamentos.md");
+    if !sample_file_1.exists() {
         let sample_content = "\
 # Fundamentos do Trivium e as Artes Liberais
 
-**Search for:** trivium, quadrivium, artes liberais, gramatica, logica, dialetica, retorica, silogismo, verdade, argumento, comunicacao, pensar, falar, expressao, linguagem, falacia, premissa, conclusao
+**Search for:** trivium, artes liberais, gramatica, logica, dialetica, retorica, silogismo, verdade, argumento, comunicacao, pensar, falar, expressao, linguagem, falacia, premissa, conclusao
 
 O Trivium constitui o fundamento clássico das sete Artes Liberais da tradição educacional ocidental. A palavra deriva do latim 'três caminhos' e organiza a mente humana para o aprendizado de qualquer outro domínio do conhecimento.
 
@@ -61,10 +74,26 @@ O Trivium divide-se rigorosamente em três disciplinas complementares:
 1. **Gramática (A Arte de Nomear):** A estrutura da linguagem. Cuida da mecânica das palavras, da sintaxe, dos símbolos e da apreensão inicial dos fatos da realidade. Sem gramática, não há matéria-prima para o pensamento.
 2. **Lógica ou Dialética (A Arte do Pensamento Correto):** A mecânica do raciocínio. Cuida da eliminação de contradições, da identificação de falácias e da construção de silogismos válidos a partir de premissas verdadeiras.
 3. **Retórica (A Arte da Comunicação e Persuasão):** A transmissão e expressão elegante da verdade encontrada pela lógica e estruturada pela gramática, movendo outros homens em direção ao bem e à razão.
-
-O Quadrivium (Aritmética, Geometria, Música e Astronomia) sucede o Trivium, estudando a matéria e o número no espaço e no tempo.
 ";
-        fs::write(&sample_file, sample_content).map_err(|e| e.to_string())?;
+        fs::write(&sample_file_1, sample_content).map_err(|e| e.to_string())?;
+    }
+
+    let sample_file_2 = knowledge_dir.join("quadrivium-fundamentos.md");
+    if !sample_file_2.exists() {
+        let sample_content_2 = "\
+# O Quadrivium e as Ciências Matemáticas
+
+**Search for:** quadrivium, aritmetica, geometria, musica, astronomia, numero, espaco, tempo, harmonia, proporcao, movimento, astros, cosmologia, calculo, matematica
+
+O Quadrivium compõe as quatro artes matemáticas superiores que sucedem o Trivium na educação clássica liberal.
+
+Suas quatro disciplinas investigam o número em suas dimensões fundamentais:
+1. **Aritmética:** O número em si mesmo (quantidade pura e discreta).
+2. **Geometria:** O número no espaço (quantidade contínua e estática).
+3. **Música (Harmonia):** O número no tempo (proporções sonoras e relações temporais).
+4. **Astronomia:** O número no espaço e no tempo (movimento ordenado dos corpos celestes).
+";
+        fs::write(&sample_file_2, sample_content_2).map_err(|e| e.to_string())?;
     }
 
     // 4. Sincroniza o índice SQLite do Ulpia

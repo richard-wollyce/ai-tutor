@@ -71,10 +71,14 @@ pub fn extract_text(path: &Path) -> Result<String, IngestError> {
     Ok(sanitized)
 }
 
-/// Extrai texto de PDF usando pdftotext com preservação de layout e UTF-8.
+/// Extrai texto de PDF usando pdftotext (com suporte multiplataforma macOS/Linux/Windows)
+/// e fallback nativo em Rust via `pdf-extract`.
 fn extract_pdf_text(pdf_path: &Path) -> Result<String, IngestError> {
-    // Procura pdftotext no caminho padrão do Git for Windows ou no PATH do sistema
+    // 1. Procura pdftotext nos caminhos padrão do macOS (Homebrew Apple Silicon / Intel), Linux, Windows ou PATH
     let candidates = [
+        PathBuf::from("/opt/homebrew/bin/pdftotext"),
+        PathBuf::from("/usr/local/bin/pdftotext"),
+        PathBuf::from("/usr/bin/pdftotext"),
         PathBuf::from(r"C:\Program Files\Git\mingw64\bin\pdftotext.exe"),
         PathBuf::from("pdftotext.exe"),
         PathBuf::from("pdftotext"),
@@ -88,31 +92,34 @@ fn extract_pdf_text(pdf_path: &Path) -> Result<String, IngestError> {
         }
     }
 
-    let bin = binary_to_use.ok_or_else(|| {
-        IngestError::ExtractionFailed("pdftotext não encontrado no sistema para processamento do PDF.".into())
-    })?;
-
-    let output = Command::new(bin)
-        .arg("-layout")
-        .arg("-enc")
-        .arg("UTF-8")
-        .arg(pdf_path)
-        .arg("-") // Emite para stdout
-        .output()
-        .map_err(|e| IngestError::ExtractionFailed(format!("Falha ao invocar pdftotext: {e}")))?;
-
-    if !output.status.success() {
-        let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(IngestError::ExtractionFailed(format!(
-            "pdftotext retornou erro (código {:?}): {}",
-            output.status.code(),
-            err_msg
-        )));
+    if let Some(bin) = binary_to_use {
+        if let Ok(output) = Command::new(bin)
+            .arg("-layout")
+            .arg("-enc")
+            .arg("UTF-8")
+            .arg(pdf_path)
+            .arg("-") // Emite para stdout
+            .output()
+        {
+            if output.status.success() {
+                let raw_out = String::from_utf8_lossy(&output.stdout).into_owned();
+                if !raw_out.trim().is_empty() {
+                    return Ok(clean_and_paginate_pdf_text(&raw_out));
+                }
+            }
+        }
     }
 
-    let raw_out = String::from_utf8_lossy(&output.stdout).into_owned();
-    let paginated = clean_and_paginate_pdf_text(&raw_out);
-    Ok(paginated)
+    // 2. Fallback nativo em Rust via pdf-extract (100% autônomo, sem requisições ou binários externos)
+    match pdf_extract::extract_text(pdf_path) {
+        Ok(text) if !text.trim().is_empty() => Ok(clean_and_paginate_pdf_text(&text)),
+        Ok(_) => Err(IngestError::ExtractionFailed(
+            "PDF processado com sucesso, mas nenhum texto legível foi encontrado.".into(),
+        )),
+        Err(e) => Err(IngestError::ExtractionFailed(format!(
+            "Falha ao extrair texto do PDF (pdftotext ausente e extração nativa falhou: {e})"
+        ))),
+    }
 }
 
 /// Limpa e formata o texto extraido do PDF, unindo hifens de quebra de linha
@@ -236,9 +243,19 @@ fn generate_local_fallback_keywords(title: &str, content: &str) -> String {
     words.join(", ")
 }
 
-/// Extrai texto de um PDF a partir de bytes crus em memoria, salvando temporariamente
-/// em disco e invocando o pdftotext nativo.
+/// Extrai texto de um PDF a partir de bytes crus em memoria.
+/// Tenta primeiro a extração direta em memória (100% nativo Rust) e, se necessário,
+/// recorre a arquivo temporário e pdftotext.
 pub fn extract_pdf_from_bytes(bytes: &[u8]) -> Result<String, IngestError> {
+    // 1. Tenta extração direta da memória usando o motor nativo em Rust (sem I/O de disco)
+    if let Ok(text) = pdf_extract::extract_text_from_mem(bytes) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Ok(clean_and_paginate_pdf_text(trimmed));
+        }
+    }
+
+    // 2. Se a extração em memória falhar, grava temporariamente e chama extract_pdf_text
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

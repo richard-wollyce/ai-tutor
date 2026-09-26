@@ -376,6 +376,15 @@ fn handle_chat(stream: &mut TcpStream, state: &AppState, body: &str) {
                 "tokens_prompt": resp.tokens_prompt,
                 "tokens_completion": resp.tokens_completion,
                 "cost_usd": resp.cost_usd,
+                "coverage": resp.coverage,
+                "methodology": {
+                    "name": resp.methodology_name,
+                    "book": resp.methodology_book,
+                },
+                "confidence": {
+                    "verdict": resp.confidence_verdict,
+                    "keyword_score": resp.keyword_score,
+                },
                 "metering": summary,
             });
 

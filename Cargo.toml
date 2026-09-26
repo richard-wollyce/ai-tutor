@@ -8,6 +8,7 @@ description = "Wollyce AI Tutor desktop prototype with Ulpia retrieval, Socratic
 [dependencies]
 kb = { path = "crates/kb" }
 model-call = { path = "crates/model-call" }
+pdf-extract = "0.12.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

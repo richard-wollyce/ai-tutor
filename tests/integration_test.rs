@@ -25,15 +25,30 @@ fn test_full_wollyce_storage_and_ulpia_integration() {
     // 2. Abre a memória do Ulpia sobre a base criada
     let memory = Memory::open(&[base_root.as_path()], false).expect("Memory::open deve suceder");
 
-    // 3. Verifica busca por conceito do Trivium (deve retornar resultado)
-    let found = memory.retrieve("quais sao as tres artes do trivium", 3);
-    assert!(!found.is_empty(), "O Ulpia deve recuperar passagens sobre o Trivium");
-    assert!(found[0].title.to_lowercase().contains("trivium") || found[0].path.contains("trivium"));
+    // 3. Verifica busca por conceito do Trivium via Memory::ask (deve retornar Hit)
+    let ask_hit = memory.ask("quais sao as tres artes do trivium", 3);
+    assert!(!ask_hit.found.is_empty(), "O Ulpia deve recuperar passagens sobre o Trivium");
+    assert_eq!(ask_hit.confidence.verdict, kb::memory::Verdict::Hit, "O veredito deve ser Hit");
+    assert!(ask_hit.confidence.keyword_score > ask_hit.confidence.floor, "Score deve superar o piso");
 
-    // 4. Verifica abstenção do Ulpia em pergunta desconhecida
-    let unknown_found = memory.retrieve("qual e o ingrediente secreto do pudim de maracuja", 3);
-    let abstained = unknown_found.is_empty() || memory.no_agreement(&unknown_found);
-    assert!(abstained, "O Ulpia deve abster-se para assunto não coberto");
+    // 4. Verifica abstenção do Ulpia em pergunta desconhecida via Memory::ask (deve retornar Nothing)
+    let ask_nothing = memory.ask("qual e o ingrediente secreto do pudim de maracuja", 3);
+    assert_eq!(ask_nothing.confidence.verdict, kb::memory::Verdict::Nothing, "O veredito para termo desconhecido deve ser Nothing");
+
+    // 5. Testa o classificador integrado do Wollyce Tutor
+    let tutor = wollyce::tutor::TutorSession::new(
+        base_root.clone(),
+        "gemini".into(),
+        "gemini-2.5-flash".into(),
+        String::new(), // offline
+    );
+    let metering = MeteringStore::open(&test_dir).unwrap();
+
+    let covered_class = tutor.classify_query(&memory, "quais sao as tres artes do trivium", &ask_hit.found, ask_hit.confidence, &metering);
+    assert_eq!(covered_class.coverage, kb::classify::Coverage::Covered);
+
+    let uncovered_class = tutor.classify_query(&memory, "pudim de maracuja", &ask_nothing.found, ask_nothing.confidence, &metering);
+    assert_eq!(uncovered_class.coverage, kb::classify::Coverage::Uncovered);
 
     // Limpeza
     let _ = fs::remove_dir_all(&test_dir);
@@ -82,4 +97,16 @@ fn test_metering_budget_lifecycle() {
     assert!(summary.total_cost_usd > 0.0);
 
     let _ = fs::remove_dir_all(&test_dir);
+}
+
+#[test]
+fn test_native_pdf_extraction_and_error_handling() {
+    // 1. Bytes inválidos devem falhar com IngestError de forma limpa, sem panic
+    let invalid_bytes = b"NOT_A_VALID_PDF_STREAM_CONTENT";
+    let res = wollyce::ingest::extract_pdf_from_bytes(invalid_bytes);
+    assert!(res.is_err(), "Deve falhar com segurança para PDF corrompido");
+
+    // 2. Extração de texto de arquivo inexistente
+    let non_existent = std::path::Path::new("arquivo_inexistente_12345.pdf");
+    assert!(wollyce::ingest::extract_text(non_existent).is_err());
 }
