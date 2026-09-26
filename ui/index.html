@@ -2,75 +2,77 @@
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Wollyce | Personal AI Tutor</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=Noto+Sans:ital,wght@0,200;0,400;1,200;1,400&display=swap" rel="stylesheet">
   <style>
-    /* Ulpia Design System Tokens */
+    /* Strict Sovereign Monochromatic Tokens (#000000 & #ffffff) */
     :root[data-theme="dark"] {
       color-scheme: dark;
-      --ground: #12100d;
-      --ink: #e7ddcc;
-      --ink-2: #ab9e89;
-      --accent: #c9a860;
-      --rule: #3d3320;
-      --chrome-ink: #c9a860;
-      --chrome-rule: #55452b;
-      --plate: #211b16;
-      --plate-ink: #ede3d2;
-      --plate-ink-2: #ac9c87;
-      --plate-border: #55452b;
-      --plate-accent: #c9a860;
-      --field: #1c1813;
-      --field-border: #4a3f31;
-      --gold: #c9a860;
-      --gold-sheen: #d8be82;
-      --gold-shadow: #a88c4e;
-      --field-1: #c9a860;
-      --field-2: #a88c4e;
-      --field-3: #6b5a2f;
-      --field-4: #3d3320;
-      --field-alpha: 0.30;
-      --field-accent-alpha: 0.30;
-      --field-vignette: rgba(0, 0, 0, 0.45);
-      --grain-opacity: 1;
-      --grain-blend: soft-light;
-      --card-hover: #29221c;
-      --badge-bg: #2d241d;
+      --ground: #000000;
+      --ink: #ffffff;
+      --ink-2: #888888;
+      --ink-3: #555555;
+      --accent: #ffffff;
+      --rule: #1e1e1e;
+      --chrome-ink: #ffffff;
+      --chrome-rule: #222222;
+      --plate: #0d0d0d;
+      --plate-ink: #ffffff;
+      --plate-ink-2: #888888;
+      --plate-border: #222222;
+      --plate-accent: #ffffff;
+      --field: #000000;
+      --field-border: #262626;
+      --gold: #ffffff;
+      --gold-sheen: #ffffff;
+      --gold-shadow: #888888;
+      --field-1: #ffffff;
+      --field-2: #888888;
+      --field-3: #444444;
+      --field-4: #222222;
+      --field-alpha: 0.15;
+      --field-accent-alpha: 0.20;
+      --field-vignette: rgba(0, 0, 0, 0.85);
+      --grain-opacity: 0.10;
+      --grain-blend: screen;
+      --card-hover: #141414;
+      --badge-bg: #141414;
     }
 
     :root[data-theme="light"] {
       color-scheme: light;
-      --ground: #f6f1e7;
-      --ink: #241d16;
-      --ink-2: #5a5044;
-      --accent: #a63325;
-      --rule: #dacfc0;
-      --chrome-ink: #241d16;
-      --chrome-rule: #dacfc0;
-      --plate: #ede5d5;
-      --plate-ink: #241d16;
-      --plate-ink-2: #5a5044;
-      --plate-border: #d6c9b4;
-      --plate-accent: #a63325;
-      --field: #fffdf8;
-      --field-border: #c9bda9;
-      --gold: #c9a860;
-      --gold-sheen: #d8be82;
-      --gold-shadow: #a88c4e;
-      --field-1: #ead9a8;
-      --field-2: #e6dcc6;
-      --field-3: #a63325;
-      --field-4: #dacfc0;
-      --field-alpha: 0.42;
-      --field-accent-alpha: 0.14;
-      --field-vignette: rgba(36, 29, 22, 0.06);
-      --grain-opacity: 0.34;
-      --grain-blend: normal;
-      --card-hover: #e5dbc9;
-      --badge-bg: #e2d7c4;
+      --ground: #ffffff;
+      --ink: #000000;
+      --ink-2: #666666;
+      --ink-3: #999999;
+      --accent: #000000;
+      --rule: #e5e5e5;
+      --chrome-ink: #000000;
+      --chrome-rule: #e0e0e0;
+      --plate: #f7f7f7;
+      --plate-ink: #000000;
+      --plate-ink-2: #666666;
+      --plate-border: #e0e0e0;
+      --plate-accent: #000000;
+      --field: #ffffff;
+      --field-border: #d5d5d5;
+      --gold: #000000;
+      --gold-sheen: #000000;
+      --gold-shadow: #666666;
+      --field-1: #000000;
+      --field-2: #555555;
+      --field-3: #aaaaaa;
+      --field-4: #e5e5e5;
+      --field-alpha: 0.15;
+      --field-accent-alpha: 0.20;
+      --field-vignette: rgba(0, 0, 0, 0.04);
+      --grain-opacity: 0.06;
+      --grain-blend: multiply;
+      --card-hover: #ececec;
+      --badge-bg: #ececec;
     }
 
     * {
@@ -99,6 +101,7 @@
       font-size: 1.05rem;
       line-height: 1.55;
       height: 100vh;
+      height: 100dvh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -253,8 +256,103 @@
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: #3fb950;
+      background: var(--ink);
       display: inline-block;
+      opacity: 0.8;
+    }
+
+    /* Sovereign Engine Control Pill */
+    .engine-pill {
+      background: var(--plate);
+      border: 1px solid var(--plate-border);
+      padding: 0.3rem 0.65rem;
+      font-size: 0.72rem;
+      color: var(--plate-ink-2);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      user-select: none;
+    }
+
+    .engine-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #444444;
+      display: inline-block;
+      transition: background 150ms ease, box-shadow 150ms ease;
+    }
+
+    .engine-dot.running {
+      background: var(--ink);
+      box-shadow: 0 0 6px rgba(255, 255, 255, 0.7);
+    }
+
+    :root[data-theme="light"] .engine-dot.running {
+      background: #000000;
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
+    }
+
+    .engine-sep {
+      color: var(--rule);
+      user-select: none;
+    }
+
+    .btn-engine-toggle {
+      background: var(--field);
+      border: 1px solid var(--plate-border);
+      color: var(--ink);
+      font-size: 0.68rem;
+      padding: 0.15rem 0.45rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .btn-engine-toggle:hover {
+      background: var(--card-hover);
+      border-color: var(--ink);
+    }
+
+    /* Sovereign Quit Button (Kill Switch) */
+    .btn-quit {
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--ink);
+      font-size: 0.75rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .btn-quit:hover {
+      background: var(--card-hover);
+      border-color: var(--ink);
+    }
+
+    /* Mobile Menu Drawer Toggle */
+    .mobile-menu-btn {
+      display: none;
+      background: transparent;
+      border: 1px solid var(--plate-border);
+      color: var(--ink);
+      cursor: pointer;
+      padding: 0.4rem;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      flex-shrink: 0;
+    }
+
+    .sidebar-backdrop {
+      display: none;
     }
 
     /* Lamp Toggle */
@@ -274,6 +372,113 @@
 
     .lamp-toggle:hover {
       background: var(--plate);
+    }
+
+    /* DeepSeek R1 Collapsible Socratic Reasoning Accordion */
+    .think-accordion {
+      margin-bottom: 0.75rem;
+      border: 1px solid var(--rule);
+      background: var(--plate);
+      font-size: 0.88rem;
+    }
+
+    .think-accordion summary {
+      cursor: pointer;
+      padding: 0.5rem 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--plate-ink-2);
+      user-select: none;
+      list-style: none;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: background 120ms ease;
+    }
+
+    .think-accordion summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .think-accordion summary:hover {
+      background: var(--card-hover);
+      color: var(--plate-ink);
+    }
+
+    .think-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-weight: 500;
+    }
+
+    .think-chevron {
+      font-size: 0.75rem;
+      transition: transform 150ms ease;
+    }
+
+    .think-accordion[open] .think-chevron {
+      transform: rotate(180deg);
+    }
+
+    .think-content {
+      padding: 0.85rem;
+      border-top: 1px solid var(--rule);
+      color: var(--ink-2);
+      font-size: 0.92rem;
+      line-height: 1.6;
+      background: var(--ground);
+    }
+
+    /* Shutdown splash overlay */
+    .shutdown-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--ground);
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    .shutdown-card {
+      border: 1px solid var(--rule);
+      padding: 3rem 2rem;
+      max-width: 500px;
+      background: var(--plate);
+    }
+
+    .shutdown-card h2 {
+      font-size: 1.5rem;
+      letter-spacing: 0.2em;
+      margin-bottom: 1rem;
+      color: var(--ink);
+    }
+
+    .shutdown-card p {
+      color: var(--ink-2);
+      font-size: 0.95rem;
+      margin-bottom: 1.5rem;
+      line-height: 1.6;
+    }
+
+    .shutdown-badge {
+      display: inline-block;
+      border: 1px solid var(--rule);
+      padding: 0.5rem 1rem;
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      color: var(--ink);
+      margin-bottom: 1.5rem;
+    }
+
+    .shutdown-hint {
+      font-size: 0.8rem !important;
+      opacity: 0.6;
+      margin-bottom: 0 !important;
     }
 
     /* Main App Layout (Sidebar + Center Stage) */
@@ -1360,6 +1565,99 @@
       width: 0%;
       transition: width 200ms ease;
     }
+
+    /* Mobile & Small Screen Adaptation (< 768px) */
+    @media (max-width: 768px) {
+      .mobile-menu-btn {
+        display: inline-flex !important;
+      }
+
+      .band {
+        padding: 0 0.75rem;
+      }
+
+      .app-tag {
+        display: none;
+      }
+
+      .sidebar {
+        position: fixed;
+        top: 3.5rem;
+        bottom: 0;
+        left: 0;
+        width: 280px;
+        max-width: 85vw;
+        z-index: 1000;
+        background: var(--ground);
+        transform: translateX(-100%);
+        transition: transform 250ms ease;
+        box-shadow: 6px 0 24px rgba(0, 0, 0, 0.7);
+      }
+
+      .sidebar.mobile-open {
+        transform: translateX(0);
+      }
+
+      .sidebar-backdrop {
+        display: none;
+        position: fixed;
+        inset: 3.5rem 0 0 0;
+        background: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(2px);
+        z-index: 999;
+      }
+
+      .sidebar-backdrop.active {
+        display: block;
+      }
+
+      .sidebar-hover-zone {
+        display: none !important;
+      }
+
+      .header-controls {
+        gap: 0.4rem;
+      }
+
+      .engine-pill {
+        padding: 0.2rem 0.45rem;
+        font-size: 0.68rem;
+      }
+
+      .engine-sep,
+      #engineIdle {
+        display: none;
+      }
+
+      .status-pill {
+        display: none;
+      }
+
+      .btn-quit {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.68rem;
+      }
+
+      .input-deck {
+        padding: 0.5rem 0.75rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
+      }
+
+      .toolbar-right .hint-text {
+        display: none;
+      }
+
+      .chat-scroll {
+        padding: 1rem 0.75rem;
+      }
+
+      .doc-reader.open {
+        width: 100% !important;
+        max-width: 100% !important;
+        position: fixed;
+        inset: 3.5rem 0 0 0;
+        z-index: 900;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1368,21 +1666,41 @@
   <header class="band">
     <div class="band-inner">
       <div class="brand-group">
+        <button type="button" class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Abrir Menu">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
         <a href="#" class="wordmark" aria-label="Wollyce"><span class="logo-mark" aria-hidden="true">W<span class="logo-grow"><span class="logo-grow-inner">ollyce</span></span></span></a>
-        <span class="app-tag mono">Personal Tutor</span>
+        <span class="app-tag mono">AI Tutor Soberano</span>
       </div>
 
       <div class="header-controls">
-        <div class="status-pill mono" id="openModalBtn">
+        <!-- Sovereign Local Engine Control Pill -->
+        <div class="engine-pill mono" id="engineStatusPill" title="Motor Local Soberano (llama-server)">
+          <span class="engine-dot" id="engineDot"></span>
+          <span id="engineLabel">DESLIGADO</span>
+          <span class="engine-sep">|</span>
+          <span id="engineModel">DeepSeek R1</span>
+          <span class="engine-sep">|</span>
+          <span id="engineIdle">Ocioso</span>
+          <button type="button" class="btn-engine-toggle mono" id="engineToggleBtn" title="Ligar ou desligar llama-server">Ligar</button>
+        </div>
+
+        <!-- Telemetry & Usage Pill -->
+        <div class="status-pill mono" id="openModalBtn" title="Telemetria e Consumo">
           <span class="status-dot"></span>
-          <span id="headerModel">Gemini 3.1 Flash Lite</span>
+          <span id="headerModel">DeepSeek R1</span>
           <span>|</span>
           <span id="headerUsage">0 / 2,000,000</span>
           <span>|</span>
           <strong id="headerCost">$0.00</strong>
         </div>
 
-        <button type="button" class="lamp-toggle" id="lampToggle" aria-label="Toggle theme">
+        <!-- Theme Toggle -->
+        <button type="button" class="lamp-toggle" id="lampToggle" aria-label="Alternar tema preto e branco">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="5"></circle>
             <line x1="12" y1="1" x2="12" y2="3"></line>
@@ -1395,9 +1713,17 @@
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
           </svg>
         </button>
+
+        <!-- Sovereign Quit Button (Kill Switch) -->
+        <button type="button" class="btn-quit mono" id="quitBtn" title="Encerrar Wollyce e finalizar processos (llama-server e servidor)">
+          <span>⏻</span> Sair
+        </button>
       </div>
     </div>
   </header>
+
+  <!-- Mobile Drawer Backdrop Overlay -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
   <!-- App Body Layout -->
   <div class="app-layout">
@@ -1610,6 +1936,35 @@
       <div style="font-size: 0.8rem; color: var(--ink-2); line-height: 1.5; border-top: 1px solid var(--plate-border); padding-top: 0.75rem;">
         Usage is billed on a flat monthly subscription. Metering protects system sustainability by tracking real provider costs in local SQLite.
       </div>
+    </div>
+  </div>
+
+  <!-- Quit Confirmation Modal -->
+  <div class="modal-overlay" id="quitModal">
+    <div class="modal-card" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3 class="mono">Encerrar Wollyce AI Tutor</h3>
+        <button class="modal-close" id="closeQuitModalBtn">✕</button>
+      </div>
+      <div style="font-size: 0.95rem; line-height: 1.6; color: var(--ink); margin-bottom: 1.25rem;">
+        Esta ação encerrará o <strong>llama-server</strong> e o <strong>servidor Rust</strong> de forma atômica, garantindo que nenhum processo fique rodando em segundo plano e liberando 100% da memória RAM e GPU.
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+        <button type="button" class="btn-attach mono" id="cancelQuitBtn" style="padding: 0.5rem 1rem;">Cancelar</button>
+        <button type="button" class="btn-send mono" id="confirmQuitBtn" style="padding: 0.5rem 1.25rem; background: var(--ink); color: var(--ground); border: 1px solid var(--ink);">
+          Encerrar e Desligar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shutdown Done Splash Overlay -->
+  <div class="shutdown-overlay" id="shutdownOverlay" style="display: none;">
+    <div class="shutdown-card mono">
+      <h2>WOLLYCE DESLIGADO</h2>
+      <p>Todos os processos do motor local (llama-server) e do servidor HTTP foram finalizados com sucesso.</p>
+      <div class="shutdown-badge">0 PROCESSOS ATIVOS • MEMÓRIA LIBERADA</div>
+      <p class="shutdown-hint">Você pode fechar esta aba com segurança.</p>
     </div>
   </div>
 
@@ -1851,9 +2206,86 @@
     const modalPromptTokens = document.getElementById("modalPromptTokens");
     const modalCompletionTokens = document.getElementById("modalCompletionTokens");
 
+    // Sovereign Engine & Process Control Elements
+    const mobileMenuBtn = document.getElementById("mobileMenuBtn");
+    const sidebarBackdrop = document.getElementById("sidebarBackdrop");
+    const engineDot = document.getElementById("engineDot");
+    const engineLabel = document.getElementById("engineLabel");
+    const engineModel = document.getElementById("engineModel");
+    const engineIdle = document.getElementById("engineIdle");
+    const engineToggleBtn = document.getElementById("engineToggleBtn");
+    const quitBtn = document.getElementById("quitBtn");
+    const quitModal = document.getElementById("quitModal");
+    const closeQuitModalBtn = document.getElementById("closeQuitModalBtn");
+    const cancelQuitBtn = document.getElementById("cancelQuitBtn");
+    const confirmQuitBtn = document.getElementById("confirmQuitBtn");
+    const shutdownOverlay = document.getElementById("shutdownOverlay");
+
     /* ==========================================================================
        4. Event Listeners & Interaction
        ========================================================================== */
+
+    // Mobile Drawer Toggle
+    if (mobileMenuBtn && sidebarBackdrop) {
+      mobileMenuBtn.addEventListener("click", () => {
+        const sidebar = document.querySelector(".sidebar");
+        if (sidebar) sidebar.classList.toggle("mobile-open");
+        sidebarBackdrop.classList.toggle("active");
+      });
+      sidebarBackdrop.addEventListener("click", () => {
+        const sidebar = document.querySelector(".sidebar");
+        if (sidebar) sidebar.classList.remove("mobile-open");
+        sidebarBackdrop.classList.remove("active");
+      });
+    }
+
+    // Sovereign Engine Toggle Switch
+    if (engineToggleBtn) {
+      engineToggleBtn.addEventListener("click", async () => {
+        engineToggleBtn.disabled = true;
+        const prevText = engineToggleBtn.textContent;
+        engineToggleBtn.textContent = "...";
+        try {
+          const res = await fetch("/api/engine/toggle", { method: "POST" });
+          const data = await res.json();
+          if (!res.ok) {
+            alert(`Aviso do Motor Local: ${data.error || "Falha ao alternar motor local."}`);
+          }
+          if (data.status) {
+            updateEngineUI(data.status);
+          } else {
+            updateEngineUI(data);
+          }
+        } catch (err) {
+          alert(`Erro ao conectar ao motor: ${err.message}`);
+          engineToggleBtn.textContent = prevText;
+        } finally {
+          engineToggleBtn.disabled = false;
+        }
+      });
+    }
+
+    // Sovereign Quit Flow (Atomically kills llama-server and Rust process)
+    if (quitBtn && quitModal) {
+      quitBtn.addEventListener("click", () => quitModal.classList.add("open"));
+      if (closeQuitModalBtn) closeQuitModalBtn.addEventListener("click", () => quitModal.classList.remove("open"));
+      if (cancelQuitBtn) cancelQuitBtn.addEventListener("click", () => quitModal.classList.remove("open"));
+      quitModal.addEventListener("click", (e) => {
+        if (e.target === quitModal) quitModal.classList.remove("open");
+      });
+
+      if (confirmQuitBtn) {
+        confirmQuitBtn.addEventListener("click", async () => {
+          quitModal.classList.remove("open");
+          if (shutdownOverlay) shutdownOverlay.style.display = "flex";
+          try {
+            await fetch("/api/system/quit", { method: "POST" });
+          } catch (_) {
+            // Expected immediate connection close
+          }
+        });
+      }
+    }
 
     // Sidebar Collapse and Expand
     const sidebarEl = document.querySelector(".sidebar");
@@ -2064,6 +2496,26 @@
       });
     }
 
+    // Parse <think>...</think> chain-of-thought tokens from DeepSeek R1
+    function parseDeepSeekThinking(raw) {
+      if (!raw) return { thinking: null, response: "" };
+      const thinkMatch = raw.match(/<think>([\s\S]*?)<\/think>/i);
+      if (thinkMatch) {
+        return {
+          thinking: thinkMatch[1].trim(),
+          response: raw.replace(/<think>[\s\S]*?<\/think>/i, "").trim()
+        };
+      }
+      if (raw.includes("<think>")) {
+        const parts = raw.split("<think>");
+        return {
+          thinking: parts[1].trim(),
+          response: parts[0].trim()
+        };
+      }
+      return { thinking: null, response: raw };
+    }
+
     function renderChatMessages() {
       const session = getCurrentSession();
       chatContainer.innerHTML = "";
@@ -2113,12 +2565,12 @@
 
           let scopeBadge = "";
           if (msg.abstained || msg.coverage === "uncovered") {
-            scopeBadge = '<span style="color: var(--accent); font-weight: 500;">• Outside Notes</span>';
+            scopeBadge = '<span style="color: var(--ink-2); font-weight: 500;">• Fora das Notas</span>';
           } else if (msg.coverage === "adjacent") {
-            scopeBadge = '<span style="color: var(--ink-2);">• Adjacent Knowledge (Guess)</span>';
+            scopeBadge = '<span style="color: var(--ink-2);">• Conhecimento Adjacente</span>';
           } else if (msg.coverage === "covered") {
             const scoreTxt = msg.confidence?.keyword_score ? ` (${Number(msg.confidence.keyword_score).toFixed(1)})` : '';
-            scopeBadge = `<span style="color: var(--gold); font-weight: 500;">• Verified in Notes${scoreTxt}</span>`;
+            scopeBadge = `<span style="color: var(--ink); font-weight: 600;">• Confirmado nas Notas${scoreTxt}</span>`;
           }
 
           let methodBadge = "";
@@ -2127,13 +2579,30 @@
             methodBadge = `<span class="mono" style="opacity: 0.85; font-size: 0.85em;"${bookAttr}>• ${escapeHtml(msg.methodology.name)}</span>`;
           }
 
+          const parsed = parseDeepSeekThinking(msg.text);
+          let thinkingHtml = "";
+          if (parsed.thinking) {
+            thinkingHtml = `
+              <details class="think-accordion" open>
+                <summary class="mono">
+                  <span class="think-badge">💡 Raciocínio Socrático [DeepSeek R1]</span>
+                  <span class="think-chevron mono">▾</span>
+                </summary>
+                <div class="think-content markdown-body">
+                  ${renderMarkdown(parsed.thinking)}
+                </div>
+              </details>
+            `;
+          }
+
           msgDiv.innerHTML = `
             <div class="message-meta">
               <span>Wollyce</span>
               ${scopeBadge}
               ${methodBadge}
             </div>
-            <div class="bubble markdown-body">${renderMarkdown(msg.text)}</div>
+            ${thinkingHtml}
+            <div class="bubble markdown-body">${renderMarkdown(parsed.response)}</div>
             ${citationsHtml}
           `;
         }
@@ -2697,6 +3166,10 @@
           headerModel.textContent = `${data.provider ? data.provider.toUpperCase() : 'AI'} (${data.model || 'flash'})`;
         }
 
+        if (data.engine) {
+          updateEngineUI(data.engine);
+        }
+
         state.documents = data.indexed_files || [];
         renderDocumentsList();
 
@@ -2718,6 +3191,49 @@
       }
     }
 
+    function updateEngineUI(eng) {
+      if (!eng || !engineDot || !engineLabel || !engineToggleBtn) return;
+      if (eng.running) {
+        engineDot.classList.add("running");
+        engineLabel.textContent = "LIGADO";
+        engineToggleBtn.textContent = "Desligar";
+        if (eng.auto_shutdown_in_seconds > 0) {
+          const mins = Math.floor(eng.auto_shutdown_in_seconds / 60);
+          const secs = eng.auto_shutdown_in_seconds % 60;
+          engineIdle.textContent = `Auto-stop: ${mins}m ${secs < 10 ? '0' : ''}${secs}s`;
+        } else {
+          engineIdle.textContent = "Auto-stop: 10m";
+        }
+      } else {
+        engineDot.classList.remove("running");
+        engineLabel.textContent = "DESLIGADO";
+        engineToggleBtn.textContent = "Ligar";
+        engineIdle.textContent = "Ocioso";
+      }
+
+      if (eng.model_name && engineModel) {
+        let shortName = eng.model_name
+          .replace("DeepSeek R1 Distill Qwen ", "DeepSeek R1 ")
+          .replace("DeepSeek-R1-Distill-Qwen-", "R1-");
+        if (eng.target === "mobile") {
+          shortName += " (Mobile)";
+        }
+        engineModel.textContent = shortName;
+      }
+    }
+
+    async function pollEngineStatus() {
+      try {
+        const res = await fetch("/api/engine/status");
+        if (res.ok) {
+          const status = await res.json();
+          updateEngineUI(status);
+        }
+      } catch (_) {
+        // Silently ignore intermittent poll drops
+      }
+    }
+
     /* ==========================================================================
        9. Initialization
        ========================================================================== */
@@ -2730,6 +3246,7 @@
     }
 
     fetchStatus();
+    setInterval(pollEngineStatus, 4000);
   </script>
 </body>
 </html>

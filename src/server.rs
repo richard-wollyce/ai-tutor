@@ -20,6 +20,7 @@ pub struct AppState {
     pub model: String,
     pub api_key: String,
     pub history: Mutex<Vec<(String, String)>>,
+    pub engine: Arc<crate::engine::EngineManager>,
 }
 
 pub fn start_server(state: Arc<AppState>, port: u16) -> Result<(), String> {
@@ -113,6 +114,33 @@ fn handle_connection(stream: &mut TcpStream, state: Arc<AppState>) {
             state.history.lock().unwrap().clear();
             send_json(stream, 200, &json!({ "ok": true, "message": "Session reset." }));
         }
+        ("POST", "/api/engine/toggle") => {
+            state.engine.touch();
+            match state.engine.toggle() {
+                Ok(running) => {
+                    let status = state.engine.status();
+                    send_json(stream, 200, &serde_json::to_value(&status).unwrap_or(json!({ "running": running })));
+                }
+                Err(err_msg) => {
+                    send_json(stream, 400, &json!({
+                        "error": err_msg,
+                        "status": state.engine.status()
+                    }));
+                }
+            }
+        }
+        ("GET", "/api/engine/status") => {
+            let status = state.engine.status();
+            send_json(stream, 200, &serde_json::to_value(&status).unwrap_or(json!({ "error": "Failed to serialize engine status" })));
+        }
+        ("POST", "/api/system/quit") => {
+            send_json(stream, 200, &json!({ "ok": true, "message": "Encerrando Wollyce e finalizando processos..." }));
+            let engine_clone = Arc::clone(&state.engine);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                engine_clone.shutdown_all();
+            });
+        }
         _ => {
             send_json(stream, 404, &json!({ "error": "Not found" }));
         }
@@ -186,12 +214,14 @@ fn serve_status(stream: &mut TcpStream, state: &AppState) {
         "indexed_files": files,
         "files_count": files.len(),
         "metering": summary,
+        "engine": state.engine.status(),
     });
 
     send_json(stream, 200, &payload);
 }
 
 fn handle_ingest(stream: &mut TcpStream, state: &AppState, body: &str) {
+    state.engine.touch();
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
@@ -295,6 +325,7 @@ fn handle_ingest(stream: &mut TcpStream, state: &AppState, body: &str) {
 }
 
 fn handle_chat(stream: &mut TcpStream, state: &AppState, body: &str) {
+    state.engine.touch();
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {

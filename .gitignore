@@ -26,5 +26,10 @@ target/
 .kb/index.db
 **/base/.kb/index.db
 
+# Large Model weights (GGUF)
+*.gguf
+models/*.gguf
+
 # Logs
 *.log
+

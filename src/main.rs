@@ -37,6 +37,13 @@ fn main() {
     println!("• Base Ulpia: {}", base_root.display());
     println!("• Diretório de Memória: {}", knowledge_dir.display());
 
+    let engine = wollyce::engine::EngineManager::new(8080);
+    let engine_status = engine.status();
+    println!("• Motor Local Soberano: {} ({})", engine_status.model_name, engine_status.target);
+    println!("  Arquivo: models/{}", engine_status.model_file);
+    println!("  llama-server: {}", if engine_status.binary_present { "DETECTADO" } else { "NÃO INSTALADO (aguardando)" });
+    println!("  Pesos GGUF: {}", if engine_status.model_present { "DETECTADO" } else { "NÃO INSTALADO (aguardando)" });
+
     let state = Arc::new(AppState {
         base_root,
         knowledge_dir,
@@ -45,6 +52,7 @@ fn main() {
         model,
         api_key: key,
         history: Mutex::new(Vec::new()),
+        engine,
     });
 
     let port = 4242;
@@ -72,14 +80,16 @@ fn main() {
 }
 
 /// Detecta chaves de API disponíveis no ambiente ou chaveiro do SO,
-/// ou adota IA Local Soberana (Ollama / llama-server) como default soberano.
+/// ou adota IA Local Soberana (llama-server com DeepSeek R1) como default soberano.
 fn resolve_provider_and_key() -> (String, String, String) {
+    let profile = wollyce::engine::active_profile();
+
     // 1. Variável explícita de ambiente para forçar provedor (ex: WOLLYCE_PROVIDER=local)
     if let Ok(forced) = std::env::var("WOLLYCE_PROVIDER") {
         let p = forced.to_lowercase();
         let model = std::env::var("WOLLYCE_MODEL")
             .or_else(|_| std::env::var("LOCAL_MODEL"))
-            .unwrap_or_else(|_| "qwen2.5:3b".into());
+            .unwrap_or_else(|_| profile.id.into());
         return (p, model, String::new());
     }
 
@@ -87,8 +97,8 @@ fn resolve_provider_and_key() -> (String, String, String) {
     if let Ok(_local_url) = std::env::var("LOCAL_AI_URL") {
         let model = std::env::var("WOLLYCE_MODEL")
             .or_else(|_| std::env::var("LOCAL_MODEL"))
-            .unwrap_or_else(|_| "qwen2.5:3b".into());
-        return ("local".into(), model, String::new());
+            .unwrap_or_else(|_| profile.id.into());
+        return ("llama-server".into(), model, String::new());
     }
 
     // 3. Provedores de API externa se houver chaves configuradas
@@ -102,7 +112,7 @@ fn resolve_provider_and_key() -> (String, String, String) {
         return ("openai".into(), "gpt-4o-mini".into(), key);
     }
 
-    // 4. Default Soberano / Local-First: sem chaves externas, opera como IA local
-    let default_local_model = std::env::var("LOCAL_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
-    ("local".into(), default_local_model, String::new())
+    // 4. Default Soberano / Local-First: sem chaves externas, opera com llama-server e DeepSeek R1
+    let default_local_model = std::env::var("LOCAL_MODEL").unwrap_or_else(|_| profile.id.into());
+    ("llama-server".into(), default_local_model, String::new())
 }

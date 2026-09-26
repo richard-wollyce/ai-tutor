@@ -8,3 +8,4 @@ pub mod ingest;
 pub mod tutor;
 pub mod server;
 pub mod storage;
+pub mod engine;
