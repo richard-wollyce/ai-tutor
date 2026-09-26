@@ -165,6 +165,7 @@ pub fn estimate_cost(provider: &str, _model: &str, input_tokens: u64, output_tok
     // Claude 3.5 Haiku: $0.80 / $4.00
     // GPT-4o-mini: $0.15 / $0.60
     let (rate_in_per_m, rate_out_per_m) = match provider {
+        "local" | "ollama" | "llama" | "llama-server" => (0.0, 0.0),
         "gemini" => (0.075, 0.30),
         "anthropic" => (0.80, 4.00),
         "openai" => (0.15, 0.60),

@@ -2690,7 +2690,13 @@
         const res = await fetch("/api/status");
         const data = await res.json();
 
-        headerModel.textContent = data.model || "Gemini 3.1 Flash Lite";
+        if (data.is_local) {
+          headerModel.textContent = `Local AI (${data.model})`;
+          headerModel.title = `Sovereign Local Inference: ${data.endpoint || 'http://localhost:11434'}`;
+        } else {
+          headerModel.textContent = `${data.provider ? data.provider.toUpperCase() : 'AI'} (${data.model || 'flash'})`;
+        }
+
         state.documents = data.indexed_files || [];
         renderDocumentsList();
 
@@ -2698,12 +2704,12 @@
           const m = data.metering;
           const pct = (m.percentage_used || 0).toFixed(1);
           headerUsage.textContent = `${(m.total_tokens || 0).toLocaleString()} / ${(m.monthly_token_cap || 2000000).toLocaleString()}`;
-          headerCost.textContent = `$${(m.total_cost_usd || 0).toFixed(4)}`;
+          headerCost.textContent = data.is_local ? "$0.00 (Local)" : `$${(m.total_cost_usd || 0).toFixed(4)}`;
 
           modalTokenPercent.textContent = `${pct}% used`;
           modalProgressFill.style.width = `${Math.min(pct, 100)}%`;
           modalTotalTokens.textContent = (m.total_tokens || 0).toLocaleString();
-          modalTotalCost.textContent = `$${(m.total_cost_usd || 0).toFixed(4)}`;
+          modalTotalCost.textContent = data.is_local ? "$0.00 (Local)" : `$${(m.total_cost_usd || 0).toFixed(4)}`;
           modalPromptTokens.textContent = (m.total_prompt_tokens || 0).toLocaleString();
           modalCompletionTokens.textContent = (m.total_completion_tokens || 0).toLocaleString();
         }

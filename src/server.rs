@@ -168,10 +168,20 @@ fn serve_status(stream: &mut TcpStream, state: &AppState) {
         }
     }
 
+    let is_local = state.provider == "local"
+        || state.provider == "ollama"
+        || state.provider == "llama"
+        || state.provider == "llama-server"
+        || state.provider.starts_with("http://");
+
+    let endpoint_url = model_call::endpoint(&state.provider, &state.model);
+
     let payload = json!({
         "provider": state.provider,
         "model": state.model,
         "has_api_key": !state.api_key.is_empty(),
+        "is_local": is_local,
+        "endpoint": endpoint_url,
         "knowledge_dir": state.knowledge_dir.display().to_string(),
         "indexed_files": files,
         "files_count": files.len(),

@@ -46,7 +46,14 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MAX_TOKENS: u32 = 4096;
 
 pub fn endpoint(provider: &str, model: &str) -> String {
+    if provider.starts_with("http://") || provider.starts_with("https://") {
+        return provider.to_string();
+    }
     match provider {
+        "local" | "ollama" => std::env::var("LOCAL_AI_URL")
+            .unwrap_or_else(|_| "http://localhost:11434/v1/chat/completions".into()),
+        "llama" | "llama-server" => std::env::var("LOCAL_AI_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080/v1/chat/completions".into()),
         "gemini" => format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         ),
@@ -58,13 +65,21 @@ pub fn endpoint(provider: &str, model: &str) -> String {
 
 /// The auth header and anything else the API rejects the call without.
 pub fn headers(provider: &str, key: &str) -> Vec<(&'static str, String)> {
-    match provider {
-        "gemini" => vec![("x-goog-api-key", key.to_string())],
-        "anthropic" => vec![
-            ("x-api-key", key.to_string()),
-            ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-        ],
-        _ => vec![("Authorization", format!("Bearer {key}"))],
+    if provider == "local" || provider == "ollama" || provider == "llama" || provider == "llama-server" || provider.starts_with("http://") {
+        if key.trim().is_empty() {
+            vec![]
+        } else {
+            vec![("Authorization", format!("Bearer {key}"))]
+        }
+    } else {
+        match provider {
+            "gemini" => vec![("x-goog-api-key", key.to_string())],
+            "anthropic" => vec![
+                ("x-api-key", key.to_string()),
+                ("anthropic-version", ANTHROPIC_VERSION.to_string()),
+            ],
+            _ => vec![("Authorization", format!("Bearer {key}"))],
+        }
     }
 }
 
@@ -156,7 +171,8 @@ pub fn call(provider: &str, model: &str, key: &str, prompt: &str) -> Result<Stri
         .build()
         .new_agent();
 
-    let max_attempts = 5;
+    let is_local = provider == "local" || provider == "ollama" || provider == "llama" || provider == "llama-server" || provider.starts_with("http://");
+    let max_attempts = if is_local { 2 } else { 5 };
     let mut last_err = String::new();
 
     for attempt in 1..=max_attempts {
@@ -168,7 +184,11 @@ pub fn call(provider: &str, model: &str, key: &str, prompt: &str) -> Result<Stri
         let mut response = match request.send_json(body(provider, model, prompt)) {
             Ok(res) => res,
             Err(e) => {
-                let err_msg = format!("could not reach {provider}: {e}");
+                let err_msg = if is_local {
+                    format!("could not reach local AI server ({provider}): {e}. Certifique-se de que o servidor local (ex: Ollama ou llama-server) está em execução.")
+                } else {
+                    format!("could not reach {provider}: {e}")
+                };
                 if attempt < max_attempts {
                     std::thread::sleep(std::time::Duration::from_millis(600 * (1 << (attempt - 1))));
                     last_err = err_msg;
@@ -290,6 +310,18 @@ mod tests {
         let blocked = json!({"candidates":[],"promptFeedback":{"blockReason":"SAFETY"}});
         let error = extract("gemini", &blocked).unwrap_err();
         assert!(error.contains("SAFETY"), "{error}");
+    }
+
+    #[test]
+    fn local_and_ollama_endpoints_resolve_cleanly() {
+        assert_eq!(endpoint("local", "qwen2.5:3b"), "http://localhost:11434/v1/chat/completions");
+        assert_eq!(endpoint("ollama", "llama3.2"), "http://localhost:11434/v1/chat/completions");
+        assert_eq!(endpoint("llama", "model"), "http://127.0.0.1:8080/v1/chat/completions");
+        assert_eq!(endpoint("http://127.0.0.1:4115/v1/chat/completions", "m"), "http://127.0.0.1:4115/v1/chat/completions");
+
+        // Headers: local sem chave não deve gerar header Authorization falso
+        assert!(headers("local", "").is_empty());
+        assert_eq!(headers("local", "secret"), vec![("Authorization", "Bearer secret".into())]);
     }
 
     #[test]

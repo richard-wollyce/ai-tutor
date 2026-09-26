@@ -47,7 +47,7 @@ pub const PROVIDERS: [(&str, &str); 4] = [
 const SERVICE: &str = "ulpia";
 
 pub fn is_provider(name: &str) -> bool {
-    PROVIDERS.iter().any(|(p, _)| *p == name)
+    name == "local" || name == "ollama" || name == "llama" || name == "llama-server" || PROVIDERS.iter().any(|(p, _)| *p == name)
 }
 
 fn env_var(provider: &str) -> Option<&'static str> {

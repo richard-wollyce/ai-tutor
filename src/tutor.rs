@@ -310,9 +310,17 @@ impl TutorSession {
             };
         }
 
-        // 2. Classificação semântica ágil via model-call usando o menor/mais eficiente modelo
-        if !self.api_key.is_empty() {
-            let classify_model = if self.provider == "gemini" {
+        // 2. Classificação semântica ágil via model-call usando o menor/mais eficiente modelo (ou IA local)
+        let is_local = self.provider == "local"
+            || self.provider == "ollama"
+            || self.provider == "llama"
+            || self.provider == "llama-server"
+            || self.provider.starts_with("http://");
+
+        if is_local || !self.api_key.is_empty() {
+            let classify_model = if is_local {
+                &self.model
+            } else if self.provider == "gemini" {
                 "gemini-2.5-flash"
             } else if self.provider == "anthropic" {
                 "claude-3-5-haiku-20241022"
