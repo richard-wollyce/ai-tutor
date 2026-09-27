@@ -1,84 +1,61 @@
 # Wollyce AI Tutor
 
-Preceptor socrático particular e tutor de aprendizagem ativa desenvolvido em Rust, com recuperação de conhecimento determinística local-first, interface desktop e controle rígido de consumo de tokens.
+> Um tutor socrático inteligente e 100% local que lê seus materiais e ensina o conteúdo de volta para você.
 
 ---
 
-## 🏛️ Arquitetura e Filosofia
+## 🎯 Por Que Este Projeto Existe?
 
-O **Wollyce** combina metodologias das Ciências da Aprendizagem com uma camada de recuperação em arquivos Markdown locais indexados por SQLite FTS5 (BM25), eliminando alucinações e garantindo que o tutor responda com base nos materiais de estudo reais do aluno.
+A maioria das ferramentas de IA entrega respostas prontas. Isso cria a ilusão de aprendizado, mas não gera retenção real.
 
-### Metodologias Pedagógicas Dinâmicas
-O tutor analisa as perguntas e aplica dinamicamente uma estratégia de ensino:
-* **Técnica Feynman:** Explicação intuitiva de conceitos sem jargões.
-* **Heurística de George Pólya:** Resolução passo a passo de algoritmos e problemas práticos.
-* **Active Recall (Peter Brown):** Desafio cognitivo para retenção ativa de conceitos.
-* **Andaimes Cognitivos e ZPD (Lev Vygotsky):** Aprendizado gradual e estruturado.
-* **Interrogação Elaborativa (John Dunlosky):** Investigação de causas, mecanismos e conexões.
-* **Maiêutica Socrática (Platão):** Reflexão crítica e desconstrução de premissas.
+O **Wollyce AI Tutor** foi construído com um propósito claro: **ensinar e educar você a partir dos seus próprios materiais de estudo**.
 
-### Segurança e Local-First
-* **Chaves de API no Chaveiro do SO:** No macOS, utiliza o `Keychain` nativo (`security`); no Windows, DPAPI (`CryptProtectData`).
-* **Zero Servidores Externos:** Banco de dados SQLite embutido via `rusqlite` bundled.
-* **Recuperação Determinística:** A biblioteca de notas é indexada e auditável sem depender de embeddings vetoriais opacos.
+Em vez de apenas responder, ele atua como um preceptor particular:
+- Lê seus livros, anotações e resumos em PDF ou Markdown.
+- Conduz diálogos socráticos e faz perguntas para testar sua retenção ativa.
+- Explica tópicos complexos de forma intuitiva e progressiva.
+- Roda de forma soberana e offline, garantindo que suas notas nunca saiam da sua máquina.
 
 ---
 
-## 📂 Estrutura do Projeto
+## 💡 Como Funciona
 
-```text
-ai-tutor/
-├── Cargo.toml               # Manifesto principal da aplicação
-├── src/                     # Núcleo da aplicação Wollyce
-│   ├── main.rs              # Inicialização do servidor e abertura do navegador
-│   ├── tutor.rs             # Seleção de metodologia e orquestração socrática
-│   ├── server.rs            # Servidor HTTP local (porta 4242)
-│   ├── storage.rs           # Gerenciamento e sincronização da base de conhecimento
-│   ├── metering.rs          # Medição de tokens e custos em SQLite
-│   ├── ingest.rs            # Ingestão e sanitização de notas (MD/PDF)
-│   └── security.rs          # Guardrails contra prompt injection
-├── ui/
-│   └── index.html           # Interface web limpa incorporada ao binário
-├── tests/
-│   └── integration_test.rs  # Testes de integração automatizados
-├── crates/                  # Motores internos
-│   ├── kb/                  # Motor de recuperação determinística e SQLite
-│   └── model-call/          # Cliente de provedores de IA e armazenamento seguro de chaves
-└── data/
-    └── wollyce_storage/     # Notas de estudo e base de conhecimento do aluno
-```
+1. **Você anexa seu material:** envie arquivos `.pdf`, `.txt` ou `.md`.
+2. **A IA organiza localmente:** o sistema indexa o conteúdo na sua máquina sem enviar dados para a nuvem.
+3. **O tutor orienta seus estudos:** faz perguntas socráticas, aplica a técnica Feynman e desafia você a demonstrar o que realmente aprendeu.
+
+---
+
+## 🛠️ Tecnologia Utilizada
+
+- **IA Local Soberana:** motor preparado para rodar modelos abertos locais (DeepSeek R1 via `llama-server` ou Ollama) com desligamento automático após 10 minutos de ociosidade para poupar bateria e RAM.
+- **Memória Determinística (Ulpia):** busca exata por palavras-chave com SQLite FTS5 (BM25), sem alucinações e sem bancos de vetores pesados.
+- **Construído em Rust:** núcleo leve, rápido, seguro e sem dependências pesadas de nuvem.
+- **Interface Minimalista:** visual moderno, digitação por voz, menu simplificado e inspeção do raciocínio dialético do modelo.
 
 ---
 
 ## 🚀 Como Executar
 
-### Pré-requisitos
-* Rust (instalado via `rustup`):
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
+### 1. Pré-requisito
+Certifique-se de ter o [Rust](https://rustup.rs/) instalado no seu computador.
 
-### Executar a Aplicação
-Execute sempre a partir da raiz do projeto:
+### 2. Iniciar o Tutor
+Na pasta do projeto, execute no terminal:
 
 ```bash
 cargo run --release
 ```
 
-A aplicação iniciará o servidor local e abrirá automaticamente no navegador em:
-**`http://127.0.0.1:4242`**
+A interface abrirá automaticamente no seu navegador em:
+👉 **`http://127.0.0.1:4242`**
 
-### Testes
-Para rodar a suíte completa de testes:
-
-```bash
-cargo test
-```
+### 3. Encerrar
+Para desligar o servidor e o motor local liberando 100% da memória, clique no botão **Sair** no topo da tela.
 
 ---
 
-## 🔑 Configuração de Provedores de IA
+## 🔒 Privacidade Garantida
 
-O Wollyce suporta Gemini, Anthropic (Claude) e OpenAI:
-* No macOS, configure a chave via variável de ambiente (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, ou `OPENAI_API_KEY`) ou registre no Chaveiro do sistema via `model-call`.
-* Por padrão, a aplicação seleciona a primeira chave disponível na ordem: **Gemini > Claude > OpenAI**.
+- Todo o material e histórico ficam salvos exclusivamente no seu dispositivo (em `data/`).
+- Zero telemetria invasiva ou envio de anotações privadas para servidores de terceiros.
