@@ -3,16 +3,23 @@ target/
 **/*.rs.bk
 *.pdb
 
-# macOS system files
+# macOS / OS system files
 .DS_Store
 .AppleDouble
 .LSOverride
 ._*
+Thumbs.db
 
 # Environment and sensitive keys
+.env
+.env.*
 *.env
 *.env.local
 *.dpapi
+*.pem
+*.key
+*.cert
+*.crt
 
 # Runtime database and SQLite files
 *.db
@@ -21,15 +28,31 @@ target/
 *.db-shm
 *.sqlite
 *.sqlite3
+data/**/*.db*
+data/**/*.sqlite*
 
 # Ulpia derived index cache
+.kb/
+**/.kb/
 .kb/index.db
+**/base/.kb/
 **/base/.kb/index.db
 
-# Large Model weights (GGUF)
+# Large Model weights (GGUF / bin)
 *.gguf
 models/*.gguf
+*.bin
+models/*.bin
 
-# Logs
+# Logs & temp files
 *.log
+*.tmp
+*.swp
+*~
+
+# IDE configurations
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
 
