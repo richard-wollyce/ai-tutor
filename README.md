@@ -14,7 +14,7 @@ Em vez de apenas responder, ele atua como um preceptor particular:
 - Lê seus livros, anotações e resumos em PDF ou Markdown.
 - Conduz diálogos socráticos e faz perguntas para testar sua retenção ativa.
 - Explica tópicos complexos de forma intuitiva e progressiva.
-- Roda de forma soberana e offline, garantindo que suas notas nunca saiam da sua máquina.
+- Roda de forma 100% offline, garantindo que suas notas nunca saiam da sua máquina.
 
 ---
 
@@ -28,7 +28,7 @@ Em vez de apenas responder, ele atua como um preceptor particular:
 
 ## 🛠️ Tecnologia Utilizada
 
-- **IA Local Soberana:** motor preparado para rodar modelos abertos locais (DeepSeek R1 via `llama-server` ou Ollama) com desligamento automático após 10 minutos de ociosidade para poupar bateria e RAM.
+- **IA Local Integrada:** motor preparado para rodar modelos abertos locais (DeepSeek R1 via `llama-server` ou Ollama) com desligamento automático após 10 minutos de ociosidade para poupar bateria e RAM.
 - **Memória Determinística (Ulpia):** busca exata por palavras-chave com SQLite FTS5 (BM25), sem alucinações e sem bancos de vetores pesados.
 - **Construído em Rust:** núcleo leve, rápido, seguro e sem dependências pesadas de nuvem.
 - **Interface Minimalista:** visual moderno, digitação por voz, menu simplificado e inspeção do raciocínio dialético do modelo.
